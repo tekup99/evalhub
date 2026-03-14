@@ -1,4 +1,4 @@
 from .ifeval import IFEVALDataset
 from .writingbench import WritingBenchDataset
-
-__all__ = ["IFEVALDataset", "WritingBenchDataset"]
+from .math_judge import MathJudgeDataset
+__all__ = ["IFEVALDataset", "WritingBenchDataset", "MathJudgeDataset"]
