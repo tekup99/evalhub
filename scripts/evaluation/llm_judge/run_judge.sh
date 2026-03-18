@@ -18,8 +18,8 @@ INPUT_FILE=$4
 eval "$(conda shell.bash hook)"
 conda activate evalhub_env
 
-# Config dosyasını yükle (Hyperparametreler için)
-CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/judge_config.env"
+# Config dosyasını yeni konumundan yükle
+CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/judge_config.env"
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi

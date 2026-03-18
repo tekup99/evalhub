@@ -22,7 +22,7 @@ fi
 # 3. Adım: Python betiğini çalıştırın
 echo "JSONL filtreleme işlemi başlatılıyor..."
 
-# Eğer asıl kodu kaydettiğiniz isim farklıysa burayı güncelleyin (Örn: python filter_correct.py)
-python scripts/cot_organizer.py
+# Python yolu yeni klasör yapısına göre güncellendi
+python scripts/evaluation/cot_pass_k_organizer/cot_organizer.py
 
 echo "İşlem tamamlandı!"

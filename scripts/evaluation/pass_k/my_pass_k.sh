@@ -11,8 +11,8 @@
 eval "$(conda shell.bash hook)"
 conda activate evalhub_env
 
-# load config
-CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/config_v1.env"
+# load config (Yol güncellendi)
+CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/config_v1.env"
 if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi

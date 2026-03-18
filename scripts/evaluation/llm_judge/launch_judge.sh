@@ -3,8 +3,8 @@
 # Log klasörünün var olduğundan emin ol (SLURM patlamaması için önemli)
 mkdir -p logs
 
-# Config'i oku
-CONFIG_FILE="scripts/judge_config.env"
+# Config'i yeni konumundan oku
+CONFIG_FILE="scripts/configs/judge_config.env"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config file not found: $CONFIG_FILE"
     exit 1
@@ -31,8 +31,8 @@ for JUDGE_MODEL_ID in $JUDGE_MODELS; do
             
             echo "Submitting SLURM Job: $JOB_NAME"
             
-            # Sbatch ile worker scriptini kuyruğa yolla ve argümanları aktar
-            sbatch --job-name="$JOB_NAME" scripts/run_judge.sh "$JUDGE_MODEL_ID" "$BASE_MODEL_ID" "$TASK" "$INPUT_FILE"
+            # Sbatch ile worker scriptini kuyruğa yolla ve argümanları aktar (yol güncellendi)
+            sbatch --job-name="$JOB_NAME" scripts/evaluation/llm_judge/run_judge.sh "$JUDGE_MODEL_ID" "$BASE_MODEL_ID" "$TASK" "$INPUT_FILE"
             
             # SLURM isteklerini çok hızlı atıp sistemi yormamak için ufak bir bekleme
             sleep 1
