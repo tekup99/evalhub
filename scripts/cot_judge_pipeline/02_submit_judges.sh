@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Config yükle
-CONFIG_FILE="scripts/configs/judge_config.env"
+CONFIG_FILE="scripts/configs/cot_judge.env"
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "Error: $CONFIG_FILE not found."
     exit 1
@@ -31,7 +31,7 @@ for base_model in ${BASE_MODELS}; do
                         --job-name="judge_$(basename "$judge_model")" \
                         --output="logs/judge_%j.out" \
                         --error="logs/judge_%j.err" \
-                        scripts/evaluation/llm_judge/run_judge.sh \
+                        scripts/cot_judge_pipeline/03_run_judge_worker.sh \
                         "$judge_model" "$base_model" "$benchmark" "$INPUT_FILE" "$temp"
                 done
             done

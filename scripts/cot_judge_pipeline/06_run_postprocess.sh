@@ -51,7 +51,7 @@ for BASE_MODEL in "${BASE_MODELS[@]}"; do
                 echo "[İŞLENİYOR] Base: ${BASE_MODEL} | Judge: ${JUDGE_MODEL} | Bench: ${BENCH}"
                 
                 # Python scriptini çağır
-                python scripts/data_prep/aggregate_majority.py \
+                python scripts/cot_judge_pipeline/04_aggregate_votes.py \
                     --input_file "$INPUT_FILE" \
                     --output_file "$OUTPUT_FILE"
             else
@@ -64,3 +64,7 @@ done
 
 echo "--------------------------------------------------------"
 echo "Tüm işlemler başarıyla tamamlandı!"
+
+# --- JÜRİ SONUÇLARINI UYGULAMA ADIMI ---
+
+

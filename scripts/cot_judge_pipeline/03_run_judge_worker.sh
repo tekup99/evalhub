@@ -18,7 +18,7 @@ eval "$(conda shell.bash hook)"
 conda activate evalhub_env
 
 # Config yükle
-CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/judge_config.env"
+CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/cot_judge.env"
 source "$CONFIG_FILE"
 
 JUDGE_SAFE_NAME=$(basename "$JUDGE_MODEL_ID")

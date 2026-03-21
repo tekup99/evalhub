@@ -13,7 +13,7 @@ eval "$(conda shell.bash hook)"
 conda activate evalhub_env
 
 # load config
-CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/config_v1.env"
+CONFIG_FILE="$SLURM_SUBMIT_DIR/scripts/configs/pass_k_eval.env"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config dosyasi bulunamadi: $CONFIG_FILE"
     exit 1

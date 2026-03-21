@@ -15,7 +15,7 @@ if [[ -f ".venv/bin/activate" ]]; then
     source .venv/bin/activate
 fi
 
-ENV_FILE="scripts/data_prep/.env"
+ENV_FILE="scripts/configs/extractor.env"
 if [[ -f "${ENV_FILE}" ]]; then
     source "${ENV_FILE}"
 else
@@ -36,7 +36,7 @@ for model in ${MODELS}; do
                 actual_suffix=""
             fi
 
-            python scripts/data_prep/extract_corrects.py \
+            python scripts/cot_judge_pipeline/01_extract_corrects.py \
                 --model "${model}" \
                 --benchmark "${benchmark}" \
                 --suffix "${actual_suffix}"

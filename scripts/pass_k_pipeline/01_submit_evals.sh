@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Config dosyasını yükle
-CONFIG_FILE="scripts/configs/config_v1.env"
+CONFIG_FILE="scripts/configs/pass_k_eval.env"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config dosyasi bulunamadi: $CONFIG_FILE"
     exit 1
@@ -12,5 +12,5 @@ source "$CONFIG_FILE"
 for MODEL in $MODELS; do
     echo "Slurm isine gönderiliyor: $MODEL"
     # Modeli TARGET_MODEL ortam değişkeni olarak Slurm betiğine aktarıyoruz
-    sbatch --export=ALL,TARGET_MODEL="$MODEL" scripts/evaluation/pass_k/my_pass_k.sh
+    sbatch --export=ALL,TARGET_MODEL="$MODEL" scripts/pass_k_pipeline/02_run_eval_worker.sh
 done

@@ -25,7 +25,7 @@ TARGET_DIR="${BASE_RESULTS}/${MODEL}/${NEW_TASK}"
 mkdir -p "$TARGET_DIR" logs
 
 # 1. Ham veriyi filtrele ve solution dosyasını oluştur
-python3 scripts/data_prep/filter.py \
+python3 scripts/utils/downsample_data.py \
     --task "$ORIG_TASK" \
     --input "$SOURCE_RAW" \
     --out_raw "${TARGET_DIR}/${NEW_TASK}_raw.jsonl" \
@@ -44,7 +44,7 @@ mv "${TARGET_DIR}/${ORIG_TASK}_results.jsonl" "${TARGET_DIR}/${NEW_TASK}_results
 mv "${TARGET_DIR}/${ORIG_TASK}_summary.json" "${TARGET_DIR}/${NEW_TASK}_summary.json" 2>/dev/null || true
 
 # 3. Kendi analyze_generations.py scriptinizi gerekli parametrelerle çalıştır
-python3 scripts/analyze_generations.py \
+python3 scripts/pass_k_pipeline/03_analyze_stats.py \
     --model "$MODEL" \
     --benchmark "$NEW_TASK" \
     --base_dir "$BASE_RESULTS"

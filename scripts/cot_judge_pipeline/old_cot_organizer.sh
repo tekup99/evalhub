@@ -23,6 +23,6 @@ fi
 echo "JSONL filtreleme işlemi başlatılıyor..."
 
 # Python yolu yeni klasör yapısına göre güncellendi
-python scripts/evaluation/cot_pass_k_organizer/cot_organizer.py
+python scripts/cot_judge_pipeline/old_cot_organizer.py
 
 echo "İşlem tamamlandı!"

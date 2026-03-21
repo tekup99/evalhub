@@ -41,7 +41,7 @@ for MODEL in "${MODELS[@]}"; do
         echo "------------------------------------------------------------"
         
         # Python betiğini ilgili argümanlarla çağır
-        python scripts/analyze_generations.py \
+        python scripts/pass_k_pipeline/03_analyze_stats.py \
             --model "$MODEL" \
             --benchmark "$BENCH"
             
