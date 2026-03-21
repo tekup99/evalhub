@@ -1,84 +1,62 @@
 import json
-import os
+import logging
+import argparse
+from pathlib import Path
 from collections import defaultdict
+from typing import Dict, List
 
-# ==============================================================
-# AYARLAR
-# ==============================================================
-# evalhub kök dizininden çalıştırıldığını varsayıyoruz:
-klasor_yolu = "results/Qwen3.5-4B/aime2025"
-veri_seti_adi = "aime2025"
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-results_file = os.path.join(klasor_yolu, f"{veri_seti_adi}_results.jsonl")
-raw_file = os.path.join(klasor_yolu, f"{veri_seti_adi}_raw.jsonl")
-output_file = os.path.join(klasor_yolu, f"{veri_seti_adi}_correct_filtered_1024.jsonl")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Organize and filter correct CoT responses.")
+    parser.add_argument("--base_dir", type=str, required=True, help="Base directory containing results")
+    parser.add_argument("--benchmark", type=str, required=True, help="Benchmark name (e.g., aime2025)")
+    parser.add_argument("--max_tasks", type=int, default=1024, help="Maximum number of tasks to process")
+    return parser.parse_args()
 
-# İlk 1024 soruyu (görevi) işleyecek sınır
-MAX_TASKS_TO_PROCESS = 1024
+def main() -> None:
+    args = parse_args()
+    base_dir = Path(args.base_dir)
+    results_file = base_dir / f"{args.benchmark}_results.jsonl"
+    raw_file = base_dir / f"{args.benchmark}_raw.jsonl"
+    output_file = base_dir / f"{args.benchmark}_correct_filtered_{args.max_tasks}.jsonl"
 
-correct_indices = defaultdict(list)
-ground_truths = {}
-generated_solutions = defaultdict(dict)
-task_counter = 0
+    if not results_file.exists() or not raw_file.exists():
+        logger.error("Required input files not found in %s", base_dir)
+        return
 
-print("="*60)
-print(f"--- ADIM 1: İlk {MAX_TASKS_TO_PROCESS} Görev İçin Doğruları Tespit Etme ---")
-print(f"Okunan dosya: {results_file}")
-print("="*60)
+    correct_indices: Dict[str, List[int]] = defaultdict(list)
+    ground_truths: Dict[str, str] = {}
+    generated_solutions: Dict[str, Dict[int, str]] = defaultdict(dict)
 
-try:
-    with open(results_file, "r", encoding="utf-8") as f_res:
-        for line in f_res:
-            if task_counter >= MAX_TASKS_TO_PROCESS:
+    with results_file.open("r", encoding="utf-8") as f_res:
+        for i, line in enumerate(f_res):
+            if i >= args.max_tasks:
                 break
             
             data = json.loads(line)
-            task_id = data.get("task_id")
-            
-            # Gerçek cevabı (ground truth) hafızaya alıyoruz
+            if not (task_id := data.get("task_id")):
+                continue
+                
             ground_truths[task_id] = data.get("ground_truth", "")
             
             for idx, is_correct in enumerate(data.get("correct", [])):
                 if is_correct:
-                    # Doğru cevabın indeksini kaydet
                     correct_indices[task_id].append(idx)
-                    
-                    # Modelin ürettiği (extracted) cevabı hafızaya al
-                    if "solutions" in data and len(data["solutions"]) > idx:
-                        generated_solutions[task_id][idx] = data["solutions"][idx]
-                    else:
-                        generated_solutions[task_id][idx] = ""
-            
-            task_counter += 1
-            
-    print(f"[BİLGİ] Adım 1 tamamlandı. Toplam {task_counter} görev incelendi.")
-    
-except FileNotFoundError:
-    print(f"[HATA] {results_file} dosyası bulunamadı! Lütfen yolları kontrol edin.")
-    exit(1)
+                    solutions = data.get("solutions", [])
+                    generated_solutions[task_id][idx] = solutions[idx] if idx < len(solutions) else ""
 
+    current_task_indices: Dict[str, int] = defaultdict(int)
+    saved_count = 0
 
-print("\n" + "="*60)
-print("--- ADIM 2: Ham (Raw) Verileri Okuma ve Filtreleme ---")
-print(f"Okunan dosya: {raw_file}")
-print("="*60)
-
-current_task_indices = defaultdict(int)
-saved_count = 0
-
-try:
-    with open(raw_file, "r", encoding="utf-8") as f_raw, open(output_file, "w", encoding="utf-8") as f_out:
+    with raw_file.open("r", encoding="utf-8") as f_raw, output_file.open("w", encoding="utf-8") as f_out:
         for line in f_raw:
             data = json.loads(line)
-            task_id = data.get("task_id")
-            
-            # Eğer task_id, Adım 1'de listeye aldığımız ilk 1024 görev içinde değilse veya hiç doğrusu yoksa atla
-            if task_id not in correct_indices:
+            if not (task_id := data.get("task_id")) or task_id not in correct_indices:
                 continue
                 
             current_idx = current_task_indices[task_id]
-            
-            # Eğer okuduğumuz bu indeks, doğru (True) olarak işaretlenmişse dosyaya yaz
             if current_idx in correct_indices[task_id]:
                 output_data = {
                     "task_id": task_id,
@@ -86,19 +64,12 @@ try:
                     "generated_answer": generated_solutions[task_id].get(current_idx, ""),
                     "raw_response": data.get("response", {})
                 }
-                
                 f_out.write(json.dumps(output_data, ensure_ascii=False) + "\n")
                 saved_count += 1
                 
             current_task_indices[task_id] += 1
-            
-except FileNotFoundError:
-    print(f"[HATA] {raw_file} dosyası bulunamadı! Lütfen yolları kontrol edin.")
-    exit(1)
 
-print("\n" + "="*60)
-print("--- İŞLEM BAŞARIYLA TAMAMLANDI ---")
-print("="*60)
-print(f"İncelenen maksimum görev sayısı : {MAX_TASKS_TO_PROCESS}")
-print(f"Toplam kaydedilen DOĞRU cevap   : {saved_count}")
-print(f"Filtrelenmiş yeni dosya         : {output_file}")
+    logger.info("Processed %d tasks. Saved %d correct responses to %s", args.max_tasks, saved_count, output_file.name)
+
+if __name__ == "__main__":
+    main()

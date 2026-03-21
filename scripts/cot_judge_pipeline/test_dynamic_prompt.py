@@ -1,55 +1,46 @@
-import os
 import logging
+import argparse
+from pathlib import Path
 from evalhub.benchmarks.alignment.math_judge import MathJudgeDataset
 
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def test_dynamic_pipeline() -> None:
-    logging.info("Initializing dynamic dataset for testing...")
-    
-    test_file = "data/passatk_filtered/Qwen3.5-4B/aime2025_corrects.jsonl"
-    if not os.path.exists(test_file):
-        logging.error(f"Test file not found: {test_file}. Please check the path.")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Test dynamic prompt loading for MathJudge.")
+    parser.add_argument("--test_file", type=str, required=True, help="Path to the JSONL test file")
+    return parser.parse_args()
+
+def test_dynamic_pipeline(test_file: Path) -> None:
+    if not test_file.exists():
+        logger.error("Test file not found: %s", test_file)
         return
 
-    test_meta = {"file_path": test_file}
-    
     try:
-        dataset = MathJudgeDataset(meta_data=test_meta)
-        logging.info("Loading original benchmarks. This may take a few seconds...")
+        dataset = MathJudgeDataset(meta_data={"file_path": str(test_file)})
         dataset.load_tasks()
         
-        task_count = len(dataset.tasks)
-        logging.info(f"SUCCESS: {task_count} tasks loaded dynamically.")
-        
-        logging.info("Testing prompt format for the first task:")
-        first_task = list(dataset.tasks.values())[0] if isinstance(dataset.tasks, dict) else dataset.tasks[0]
-            
-        prompt_text = first_task.prompt
-        print("-" * 50)
-        print(prompt_text[:800] + "\n\n... [PROMPT CONTINUES] ...")
-        print("-" * 50)
-        
-        logging.info("Checking dynamic question matching...")
-        if "MISSING_QUESTION_IN_DATA" in prompt_text:
-            logging.error("FAILED: Could not fetch the original question from Evalhub.")
-        else:
-            logging.info("SUCCESS: Original question integrated into the Judge prompt perfectly.")
+        if not dataset.tasks:
+            logger.warning("No tasks loaded from the dataset.")
+            return
 
-        logging.info(f"Metadata check: {first_task.metadata}")
+        first_task = list(dataset.tasks.values())[0] if isinstance(dataset.tasks, dict) else dataset.tasks[0]
+        prompt_text = first_task.prompt
         
-        logging.info("Testing regex response extraction...")
-        dummy_model_response = "Here is my step-by-step reasoning... Therefore, the final answer is \\boxed{no}."
-        extracted = dataset.extract_solution("dummy_id", dummy_model_response)
-        logging.info(f"Extracted result: '{extracted}' (Expected: 'no')")
+        if "MISSING_QUESTION_IN_DATA" in prompt_text:
+            logger.error("Failed to fetch the original question for task: %s", first_task.task_id)
         
-        if extracted in ["yes", "no"]:
-            logging.info("SUCCESS: Dynamic python logic is working flawlessly.")
+        dummy_response = "Here is my step-by-step reasoning... Therefore, the final answer is \\boxed{no}."
+        extracted = dataset.extract_solution("dummy_id", dummy_response)
+        
+        if extracted not in ["yes", "no"]:
+            logger.error("Regex extraction failed. Expected 'yes' or 'no', got: '%s'", extracted)
         else:
-            logging.error("FAILED: Regex extraction issue detected.")
+            logger.info("Dynamic pipeline test completed successfully.")
             
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+        logger.error("Pipeline testing failed: %s", e, exc_info=True)
 
 if __name__ == "__main__":
-    test_dynamic_pipeline()
+    args = parse_args()
+    test_dynamic_pipeline(Path(args.test_file))
