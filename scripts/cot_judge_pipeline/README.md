@@ -7,5 +7,5 @@ This pipeline is responsible for filtering correct generations and evaluating th
 * **`03_run_judge_worker.sh`**: The core worker that prompts the judge model to evaluate the extracted solutions.
 * **`04_aggregate_votes.py`**: Computes the majority vote from multiple judge responses (e.g., majority "yes" or "no").
 * **`05_apply_metrics.py`**: Merges the judge's majority vote with the original results, updating the true correct counts and Pass@K metrics.
-* **`06_run_postprocess.sh`**: Automates the aggregation and metric application steps (runs `04` and `05` sequentially).
+* **`04_05_run_postprocess.sh`**: Automates the aggregation and metric application steps (runs `04_aggregate_votes.py` and `05_apply_metrics.py` sequentially).
 * **`test_dynamic_prompt.py`**: A testing utility to verify that the dynamic prompt formatting and dataset loading work correctly for the judge.
