@@ -1,49 +1,45 @@
 #!/bin/bash
-#SBATCH --job-name=extract_pass_at_k    # İşin adı
-#SBATCH --output=logs/%x-%j.out     # Standart çıktı logları
-#SBATCH -e logs/%x-%j.err           # Hata logları
-#SBATCH --ntasks=1                  
-#SBATCH --cpus-per-task=1           
-#SBATCH --mem=4G                    
-#SBATCH --time=00:30:00             
+#SBATCH --job-name=extract_corrects
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=4G
+#SBATCH --time=00:30:00
 
-# 1. Adım: Çalışma dizinine (Evalhub kök dizini) geçiş yapın
-cd $SLURM_SUBMIT_DIR
+set -euo pipefail
 
-# 2. Adım: Sanal ortamı aktif edin
-if [ -f ".venv/bin/activate" ]; then
+cd "${SLURM_SUBMIT_DIR}"
+
+if [[ -f ".venv/bin/activate" ]]; then
     source .venv/bin/activate
-    echo "[Slurm] Sanal ortam aktif edildi."
 fi
 
-# 3. Adım: Çevre değişkenlerini (.env) yükle
 ENV_FILE="scripts/data_prep/.env"
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
-    echo "[Slurm] .env dosyası başarıyla yüklendi."
+if [[ -f "${ENV_FILE}" ]]; then
+    source "${ENV_FILE}"
 else
-    echo "[HATA] $ENV_FILE bulunamadı! Lütfen .env dosyasının varlığından emin olun."
+    echo "Error: ${ENV_FILE} not found." >&2
     exit 1
 fi
 
-echo "============================================================"
-echo "[Extractor] PRM için doğru cevaplar filtreleniyor..."
-echo "Tanımlı Modeller: $MODELS"
-echo "Tanımlı Benchmarklar: $BENCHMARKS"
-echo "============================================================"
+# Parse SUFFIXES into an array, defaulting to "BASE" if undefined
+IFS=' ' read -r -a SUFFIX_LIST <<< "${SUFFIXES:-BASE}"
 
-# 4. Adım: Modeller ve Benchmarklar üzerinde iç içe döngü (loop)
-for MODEL in $MODELS; do
-    for BENCHMARK in $BENCHMARKS; do
-        echo "------------------------------------------------------------"
-        echo "-> İşleniyor: Model=$MODEL | Benchmark=$BENCHMARK"
-        echo "------------------------------------------------------------"
-        
-        # Python betiğini çalıştır
-        python scripts/data_prep/extract_corrects.py --model "$MODEL" --benchmark "$BENCHMARK"
+for model in ${MODELS}; do
+    for benchmark in ${BENCHMARKS}; do
+        for suffix in "${SUFFIX_LIST[@]}"; do
+            
+            # Convert "BASE" keyword to empty string for the original folder
+            actual_suffix="${suffix}"
+            if [[ "${actual_suffix}" == "BASE" ]]; then
+                actual_suffix=""
+            fi
+
+            python scripts/data_prep/extract_corrects.py \
+                --model "${model}" \
+                --benchmark "${benchmark}" \
+                --suffix "${actual_suffix}"
+        done
     done
 done
-
-echo "============================================================"
-echo "[Extractor] Tüm kombinasyonlar için işlemler tamamlandı!"
-echo "============================================================"

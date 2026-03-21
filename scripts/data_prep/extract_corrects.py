@@ -1,128 +1,88 @@
 import json
-import os
 import argparse
+import logging
+from pathlib import Path
 from collections import defaultdict
 
-def main():
-    # ==============================================================
-    # DYNAMIC SETTINGS (Parameters from bash script)
-    # ==============================================================
-    parser = argparse.ArgumentParser(description="Extract dynamically correct solutions for PRM Judge.")
-    parser.add_argument("--model", type=str, required=True, help="Name of the model (e.g., Qwen3.5-4B)")
-    parser.add_argument("--benchmark", type=str, required=True, help="Name of the benchmark (e.g., aime2025)")
-    args = parser.parse_args()
+# Configure professional logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    # Dynamic paths for input files
-    base_dir = f"results/{args.model}/{args.benchmark}"
-    results_file = os.path.join(base_dir, f"{args.benchmark}_results.jsonl")
-    raw_file = os.path.join(base_dir, f"{args.benchmark}_raw.jsonl")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract correct solutions from benchmark results.")
+    parser.add_argument("--model", type=str, required=True, help="Model name (e.g., Qwen3.5-4B-Base)")
+    parser.add_argument("--benchmark", type=str, required=True, help="Benchmark name (e.g., aime2026)")
+    parser.add_argument("--suffix", type=str, default="", help="Directory suffix (e.g., _64 or empty)")
+    return parser.parse_args()
+
+def main() -> None:
+    args = parse_args()
+
+    # Dynamic input paths
+    base_dir = Path(f"results/{args.model}/{args.benchmark}{args.suffix}")
+    results_file = base_dir / f"{args.benchmark}{args.suffix}_results.jsonl"
+    raw_file = base_dir / f"{args.benchmark}{args.suffix}_raw.jsonl"
+
+    # Dynamic output path
+    out_dir = Path(f"data/passatk_filtered/{args.model}")
+    out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Dynamic path for the output destination
-    out_dir = f"data/passatk_filtered/{args.model}"
-    os.makedirs(out_dir, exist_ok=True)
-    output_file = os.path.join(out_dir, f"{args.benchmark}_corrects.jsonl")
+    output_file = out_dir / f"{args.benchmark}{args.suffix}_corrects.jsonl"
 
-    # ==============================================================
-    # START PROCESSING
-    # ==============================================================
+    if not results_file.exists():
+        logging.error(f"Results file not found: {results_file}")
+        return
+
     correct_indices = defaultdict(list)
-    generation_counts = {}
     ground_truths = {}
     generated_solutions = defaultdict(dict)
-    task_counter = 0
 
-    print("="*70)
-    print("--- STEP 1: Identifying Correct Solutions and Statistics ---")
-    print(f"Model: {args.model} | Benchmark: {args.benchmark}")
-    print(f"Reading file: {results_file}")
-    print("="*70)
+    # Step 1: Identify which generations are correct
+    with results_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            data = json.loads(line)
+            task_id = data.get("task_id")
+            if not task_id:
+                continue
 
-    try:
-        with open(results_file, "r", encoding="utf-8") as f_res:
-            for line in f_res:
-                data = json.loads(line)
-                task_id = data.get("task_id")
-                
-                # Store the ground truth answer
-                ground_truths[task_id] = data.get("ground_truth", "")
-                
-                # Count total generations for this task
-                correct_list = data.get("correct", [])
-                generation_counts[task_id] = len(correct_list)
-                
-                for idx, is_correct in enumerate(correct_list):
-                    if is_correct:
-                        # Save the index of the correct answer
-                        correct_indices[task_id].append(idx)
-                        
-                        # Store the extracted generated solution
-                        if "solutions" in data and len(data["solutions"]) > idx:
-                            generated_solutions[task_id][idx] = data["solutions"][idx]
-                        else:
-                            generated_solutions[task_id][idx] = ""
-                
-                # Print individual task stats
-                correct_count = len(correct_indices[task_id])
-                total_gen = generation_counts[task_id]
-                print(f"Task: {task_id:<20} | Generated: {total_gen:<5} | Correct: {correct_count}")
-                
-                task_counter += 1
-                
-        print("-" * 70)
-        print(f"[INFO] Step 1 complete. Processed {task_counter} total tasks.")
-        
-    except FileNotFoundError:
-        print(f"[ERROR] File {results_file} not found! Please check the paths.")
-        exit(1)
+            ground_truths[task_id] = data.get("ground_truth", "")
+            
+            for idx, is_correct in enumerate(data.get("correct", [])):
+                if is_correct:
+                    correct_indices[task_id].append(idx)
+                    solutions = data.get("solutions", [])
+                    generated_solutions[task_id][idx] = solutions[idx] if idx < len(solutions) else ""
 
-
-    print("\n" + "="*70)
-    print("--- STEP 2: Reading and Filtering Raw Data ---")
-    print(f"Reading file: {raw_file}")
-    print("="*70)
+    if not raw_file.exists():
+        logging.error(f"Raw file not found: {raw_file}")
+        return
 
     current_task_indices = defaultdict(int)
-    saved_count = 0
+    
+    # Step 2: Extract raw responses for correct generations only
+    with raw_file.open("r", encoding="utf-8") as f_raw, output_file.open("w", encoding="utf-8") as f_out:
+        for line in f_raw:
+            data = json.loads(line)
+            task_id = data.get("task_id")
+            
+            if task_id not in correct_indices:
+                continue
+                
+            current_idx = current_task_indices[task_id]
+            
+            if current_idx in correct_indices[task_id]:
+                output_data = {
+                    "task_id": f"{task_id}_gen_{current_idx}",
+                    "original_task_id": task_id,
+                    "generation_idx": current_idx,
+                    "ground_truth": ground_truths.get(task_id, ""),
+                    "generated_answer": generated_solutions[task_id].get(current_idx, ""),
+                    "raw_response": data.get("response", {})
+                }
+                f_out.write(json.dumps(output_data, ensure_ascii=False) + "\n")
+                
+            current_task_indices[task_id] += 1
 
-    try:
-        with open(raw_file, "r", encoding="utf-8") as f_raw, open(output_file, "w", encoding="utf-8") as f_out:
-            for line in f_raw:
-                data = json.loads(line)
-                task_id = data.get("task_id")
-                
-                # Skip if the task has no correct answers recorded
-                if task_id not in correct_indices:
-                    continue
-                    
-                current_idx = current_task_indices[task_id]
-                
-                # If this specific index was marked as correct, write it to the new file
-                if current_idx in correct_indices[task_id]:
-                    output_data = {
-                        "task_id": f"{task_id}_gen_{current_idx}",  # EvalHub için benzersiz ID
-                        "original_task_id": task_id,                # Orijinal AIME soru ID'si
-                        "generation_idx": current_idx,              # Base Model'in kaçıncı üretimi olduğu
-                        "ground_truth": ground_truths.get(task_id, ""),
-                        "generated_answer": generated_solutions[task_id].get(current_idx, ""),
-                        "raw_response": data.get("response", {})
-                    }
-                    
-                    f_out.write(json.dumps(output_data, ensure_ascii=False) + "\n")
-                    saved_count += 1
-                    
-                current_task_indices[task_id] += 1
-                
-    except FileNotFoundError:
-        print(f"[ERROR] File {raw_file} not found! Please check the paths.")
-        exit(1)
-
-    print("\n" + "="*70)
-    print("--- PROCESS COMPLETED SUCCESSFULLY ---")
-    print("="*70)
-    print(f"Total unique tasks processed : {task_counter}")
-    print(f"Total correct samples saved  : {saved_count}")
-    print(f"Filtered output file         : {output_file}")
-    print("="*70)
+    logging.info(f"Extraction complete. Filtered output saved to {output_file}")
 
 if __name__ == "__main__":
     main()
