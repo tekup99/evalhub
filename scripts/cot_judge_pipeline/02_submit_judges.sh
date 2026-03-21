@@ -1,32 +1,30 @@
 #!/bin/bash
 set -euo pipefail
 
-# Config yükle
 CONFIG_FILE="scripts/configs/cot_judge.env"
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Error: $CONFIG_FILE not found."
+    echo "[ERROR] Configuration file not found: $CONFIG_FILE"
     exit 1
 fi
 source "$CONFIG_FILE"
 
-# Listeleri diziye çevir
 IFS=' ' read -r -a SUFFIX_LIST <<< "${SUFFIXES}"
 IFS=' ' read -r -a TEMP_LIST <<< "${TEMPERATURES}"
 
 mkdir -p logs
+
+echo "[INFO] Initializing LLM-as-a-Judge batch submissions..."
 
 for base_model in ${BASE_MODELS}; do
     for judge_model in ${JUDGE_MODELS}; do
         for benchmark in ${BENCHMARKS}; do
             for suffix in "${SUFFIX_LIST[@]}"; do
                 for temp in "${TEMP_LIST[@]}"; do
-                    # Veri yolu için model ismini temizle (Qwen/ kısmını at)
                     BASE_SAFE=$(basename "$base_model")
                     INPUT_FILE="data/passatk_filtered/${BASE_SAFE}/${benchmark}${suffix}_corrects.jsonl"
                     
-                    echo "--- Submitting: ${benchmark}${suffix} | Temp: ${temp} ---"
+                    echo "[INFO] Submitting -> Benchmark: ${benchmark}${suffix} | Temp: ${temp} | Base: ${BASE_SAFE}"
                     
-                    # sbatch komutu
                     sbatch --wait \
                         --job-name="judge_$(basename "$judge_model")" \
                         --output="logs/judge_%j.out" \
@@ -38,3 +36,5 @@ for base_model in ${BASE_MODELS}; do
         done
     done
 done
+
+echo "[INFO] All judge jobs submitted successfully."

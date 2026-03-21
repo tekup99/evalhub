@@ -1,16 +1,19 @@
 #!/bin/bash
+set -euo pipefail
 
-# Config dosyasını yükle
 CONFIG_FILE="scripts/configs/pass_k_eval.env"
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Config dosyasi bulunamadi: $CONFIG_FILE"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[ERROR] Configuration file not found: $CONFIG_FILE"
     exit 1
 fi
+
 source "$CONFIG_FILE"
 
-# Config içindeki her bir model için ayrı bir Slurm işi başlat
+echo "[INFO] Starting job submission process for Pass@K evaluation..."
+
 for MODEL in $MODELS; do
-    echo "Slurm isine gönderiliyor: $MODEL"
-    # Modeli TARGET_MODEL ortam değişkeni olarak Slurm betiğine aktarıyoruz
+    echo "[INFO] Submitting Slurm job for model: $MODEL"
     sbatch --export=ALL,TARGET_MODEL="$MODEL" scripts/pass_k_pipeline/02_run_eval_worker.sh
 done
+
+echo "[INFO] All evaluation jobs have been submitted to the cluster."

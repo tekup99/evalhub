@@ -1,58 +1,49 @@
 import json
-import os
+import logging
 import argparse
 from pathlib import Path
+from typing import Dict, List, Any
 
-def main():
-    # Argümanları tanımla
-    parser = argparse.ArgumentParser(description="EvalHub sonuçlarındaki üretim (generation) istatistiklerini analiz eder.")
-    parser.add_argument("--model", type=str, required=True, help="Modelin adı (Örn: Qwen3.5-4B-Base)")
-    parser.add_argument("--benchmark", type=str, required=True, help="Benchmark adı (Örn: aime2026)")
-    parser.add_argument("--base_dir", type=str, default="/user/home/t.tuna/evalhub/results", help="Sonuçların bulunduğu ana dizin")
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Analyzes generation statistics from EvalHub results.")
+    parser.add_argument("--model", type=str, required=True, help="Model name (e.g., Qwen3.5-4B-Base)")
+    parser.add_argument("--benchmark", type=str, required=True, help="Benchmark name (e.g., aime2026)")
+    parser.add_argument("--base_dir", type=str, default="results", help="Base directory for results")
+    return parser.parse_args()
 
-    # Dosya yollarını oluştur
+def main() -> None:
+    args = parse_args()
     results_dir = Path(args.base_dir) / args.model / args.benchmark
     input_file = results_dir / f"{args.benchmark}_results.jsonl"
     output_file = results_dir / f"{args.benchmark}_generation_stats.json"
 
-    # Dosyanın var olup olmadığını kontrol et
     if not input_file.exists():
-        print(f"❌ HATA: Girdi dosyası bulunamadı: {input_file}")
-        print("Lütfen model ve benchmark isimlerinin doğru olduğundan emin olun.")
+        logging.error(f"Input file not found: {input_file}")
         return
 
-    stats_list = []
+    stats_list: List[Dict[str, Any]] = []
+    logging.info(f"Analyzing: {input_file}")
+    logging.info(f"{'Task ID':<25} | {'Generated (k)':<15} | {'Correct':<10} | {'Wrong':<10}")
+    logging.info("-" * 70)
 
-    print("=" * 70)
-    print(f"📊 Analiz Edilen Dosya: {input_file}")
-    print("=" * 70)
-    print(f"{'Task ID':<25} | {'Generated (k)':<15} | {'Correct':<10} | {'Wrong':<10}")
-    print("-" * 70)
-
-    # JSONL dosyasını satır satır oku
-    with open(input_file, 'r', encoding='utf-8') as f:
-        for line in f:
+    with input_file.open('r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
             if not line.strip():
                 continue
             
             try:
                 data = json.loads(line)
                 task_id = data.get("task_id", "Unknown")
-                
-                # "correct" listesi her bir üretimin (sample) doğru(True)/yanlış(False) durumunu tutar
                 correct_list = data.get("correct", [])
                 
-                # İstatistikleri hesapla
                 generated_k = len(correct_list)
                 correct_answers = sum(1 for x in correct_list if x is True)
                 wrong_answers = generated_k - correct_answers
                 
-                # Konsola yazdır
-                print(f"{task_id:<25} | {generated_k:<15} | {correct_answers:<10} | {wrong_answers:<10}")
+                logging.info(f"{task_id:<25} | {generated_k:<15} | {correct_answers:<10} | {wrong_answers:<10}")
                 
-                # Listeye ekle
                 stats_list.append({
                     "task_id": task_id,
                     "generated_answers_k": generated_k,
@@ -60,15 +51,12 @@ def main():
                     "wrong_answers": wrong_answers
                 })
             except json.JSONDecodeError:
-                print(f"Hatalı JSON satırı atlandı.")
+                logging.warning(f"Skipping invalid JSON at line {line_num}")
 
-    # Sonuçları yeni JSON dosyasına kaydet
-    with open(output_file, 'w', encoding='utf-8') as f_out:
+    with output_file.open('w', encoding='utf-8') as f_out:
         json.dump(stats_list, f_out, indent=4, ensure_ascii=False)
         
-    print("=" * 70)
-    print(f"✅ İşlem tamamlandı! Toplam {len(stats_list)} görev (task) analiz edildi.")
-    print(f"📁 Sonuçlar kaydedildi: {output_file}")
+    logging.info(f"Analysis complete. Processed {len(stats_list)} tasks. Saved to {output_file}")
 
 if __name__ == "__main__":
     main()
