@@ -76,14 +76,14 @@ python scripts/utils/plot_custom_group.py \
         "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2025/summary.json" \
         "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026/summary.json" \
     --labels \
-        "(a) Default Tokens / AIME 2026" \
-        "(b) Default Tokens / AIME 2025" \
+        "(a) 8192 Tokens / AIME 2026" \
+        "(b) 8192 Tokens / AIME 2025" \
         "(c) 16384 Tokens / AIME 2025" \
         "(d) 16384 Tokens / AIME 2026" \
     --colors     "$C1" "$C2" "$C1" "$C2" \
     --linestyles "$L1" "$L1" "$L2" "$L2" \
     --markers    "$M1" "$M1" "$M2" "$M2" \
-    --title "Max Tokens Effect: Default vs 16384" \
+    --title "Max Tokens Effect: 8192 vs 16384" \
     --out "${OUT_DIR}/plot3_max_tokens_comparison.png"
 
 
