@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import re
+import math
 from pathlib import Path
 import matplotlib.pyplot as plt
 
@@ -23,14 +24,17 @@ def process_summary(path: Path) -> None:
     label, is_cot = extract_metadata(path)
     k_vals = sorted(pass_k.keys())
     
+    # X eksenindeki sayilari k'nin log2 degerine ceviriyoruz (2^x = k)
+    log2_k_vals = [int(math.log2(k)) for k in k_vals]
+    
     plt.figure(figsize=(10, 6))
-    plt.plot(k_vals, [pass_k[k] for k in k_vals], label=label, linewidth=2,
+    plt.plot(log2_k_vals, [pass_k[k] for k in k_vals], label=label, linewidth=2,
              marker='s' if is_cot else 'o', linestyle='--' if is_cot else '-')
     
-    plt.xscale('log', base=2)
-    plt.xticks(k_vals, k_vals)
+    # xticks olarak donusturulmus kuvvetleri veriyoruz
+    plt.xticks(log2_k_vals, log2_k_vals)
     plt.title(f"Performance: {label}", fontweight="bold")
-    plt.xlabel("k (Log Scale)")
+    plt.xlabel(r"$\log_2(k)$")
     plt.ylabel("Pass@k Score")
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend()

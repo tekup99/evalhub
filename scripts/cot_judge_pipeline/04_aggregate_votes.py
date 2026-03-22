@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Aggregate LLM-as-a-Judge results using majority voting.")
-    parser.add_argument("--input_file", type=str, required=True, help="Input JSONL file")
-    parser.add_argument("--output_file", type=str, required=True, help="Output JSONL file")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_file", type=str, required=True)
+    parser.add_argument("--output_file", type=str, required=True)
     return parser.parse_args()
 
 def main() -> None:
@@ -32,7 +32,11 @@ def main() -> None:
             try:
                 data = json.loads(line)
                 if task_id := data.get("task_id"):
-                    task_groups[task_id].append(data.get("solution", ""))
+                    sol = data.get("solution", "")
+                    if isinstance(sol, list):
+                        task_groups[task_id].extend([str(s) for s in sol])
+                    else:
+                        task_groups[task_id].append(str(sol))
             except json.JSONDecodeError:
                 continue
 
@@ -40,7 +44,8 @@ def main() -> None:
 
     with output_path.open("w", encoding="utf-8") as f_out:
         for task_id, solutions in task_groups.items():
-            majority_correct = solutions.count("yes") > (len(solutions) / 2)
+            yes_count = sum(1 for s in solutions if "yes" in s.lower())
+            majority_correct = yes_count > (len(solutions) / 2) if len(solutions) > 0 else False
             output_data = {
                 "task_id": task_id,
                 "solutions": solutions,

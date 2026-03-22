@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Apply judge results and recalculate metrics.")
-    parser.add_argument("--base_results_file", type=str, required=True, help="Original results JSONL")
-    parser.add_argument("--judge_majority_file", type=str, required=True, help="Judge majority vote JSONL")
-    parser.add_argument("--output_file", type=str, required=True, help="Updated output JSONL")
-    parser.add_argument("--summary_file", type=str, required=True, help="Summary JSON output")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_results_file", type=str, required=True)
+    parser.add_argument("--judge_majority_file", type=str, required=True)
+    parser.add_argument("--output_file", type=str, required=True)
+    parser.add_argument("--summary_file", type=str, required=True)
     return parser.parse_args()
 
 def main() -> None:
