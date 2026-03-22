@@ -24,6 +24,7 @@ share/python-wheels/
 results/
 logs/
 data/
+comparison_plots/
 *.egg-info/
 .installed.cfg
 *.egg
