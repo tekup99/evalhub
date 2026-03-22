@@ -13,6 +13,7 @@ BASE_MODEL_ID=$2
 TASK=$3
 INPUT_FILE=$4
 TEMPERATURE=$5
+K_VAL=$6 # 6. argüman olarak k değerini alıyoruz
 
 eval "$(conda shell.bash hook)"
 conda activate evalhub_env
@@ -51,7 +52,8 @@ done
 sleep 15 # Ekstra tampon süresi
 echo "[INFO] Judge server is online and responding."
 
-OUT_DIR="results/judgments/${BASE_SAFE_NAME}_evaluated_by_${JUDGE_SAFE_NAME}/${TASK}_t${TEMPERATURE}"
+# BURASI GÜNCELLENDİ: Klasör adı t{temperature}_k{K_VAL} formatına getirildi
+OUT_DIR="results/judgments/${BASE_SAFE_NAME}_evaluated_by_${JUDGE_SAFE_NAME}/${TASK}_t${TEMPERATURE}_k${K_VAL}"
 mkdir -p "$OUT_DIR"
 
 if [[ -n "${OVERRIDE_ARGS:-}" ]] && [[ "$OVERRIDE_ARGS" == *\} ]]; then

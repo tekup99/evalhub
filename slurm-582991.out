@@ -1,3 +1,0 @@
-------------------------------------------------------------
-Submitting job for: Suffix='' | Temp='0.0'
-sbatch: error: Unable to open file evalhub/scripts/evaluation/llm_judge/run_judge.sh
