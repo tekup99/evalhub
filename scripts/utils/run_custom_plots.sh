@@ -25,7 +25,10 @@ L2="dashed"
 
 # Markerlar
 M1="o"
-M2="s"
+M2="X"
+M3="D"
+M4="^"
+M5="v"
 
 OUT_DIR="comparison_plots"
 mkdir -p "$OUT_DIR"
@@ -35,17 +38,18 @@ python scripts/utils/plot_custom_group.py \
     --paths \
         "results/Qwen3.5-4B/aime2025/aime2025_summary.json" \
         "results/Qwen3.5-4B-Base/aime2025/aime2025_summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2025/summary.json" \
-        "results/judgments/Qwen3.5-4B_evaluated_by_Qwen3.5-35B-A3B/aime2025/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_8192/aime2025/summary.json" \
+        "results/judgments/Qwen3.5-4B_evaluated_by_Qwen3.5-35B-A3B_8192/aime2025/summary.json" \
     --labels \
-        "(a) 4B (Raw)" \
-        "(b) 4B-Base (Raw)" \
-        "(c) 4B-Base Judged" \
-        "(d) 4B Judged" \
-    --colors     "$C1" "$C2" "$C1" "$C2" \
-    --linestyles "$L1" "$L1" "$L2" "$L2" \
-    --markers    "$M1" "$M1" "$M2" "$M2" \
-    --title "AIME 2025: Qwen3.5-4B vs Base (Raw vs Judged)" \
+        "(a) 4B (Pass@k)" \
+        "(b) 4B-Base (Pass@k)" \
+        "(c) 4B-Base Cot-Pass@k" \
+        "(d) 4B Cot-Pass@k" \
+    --colors     "$C1" "$C2" "$C3" "$C4" \
+    --linestyles "$L1" "$L1" "$L1" "$L1" \
+    --markers    "$M1" "$M2" "$M3" "$M4" \
+    --title "AIME 2025: Qwen3.5-4B vs Base (Pass@k vs Cot-Pass@k)" \
+    --subtitle "Judge Model: Qwen3.5-35B-A3B (Max Tokens: 8192)" \
     --out "${OUT_DIR}/plot1_aime2025.png"
 
 
@@ -54,25 +58,26 @@ python scripts/utils/plot_custom_group.py \
     --paths \
         "results/Qwen3.5-4B/aime2026/aime2026_summary.json" \
         "results/Qwen3.5-4B-Base/aime2026/aime2026_summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026/summary.json" \
-        "results/judgments/Qwen3.5-4B_evaluated_by_Qwen3.5-35B-A3B/aime2026/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_8192/aime2026/summary.json" \
+        "results/judgments/Qwen3.5-4B_evaluated_by_Qwen3.5-35B-A3B_8192/aime2026/summary.json" \
     --labels \
-        "(a) 4B (Raw)" \
-        "(b) 4B-Base (Raw)" \
-        "(c) 4B-Base Judged" \
-        "(d) 4B Judged" \
-    --colors     "$C1" "$C2" "$C1" "$C2" \
-    --linestyles "$L1" "$L1" "$L2" "$L2" \
-    --markers    "$M1" "$M1" "$M2" "$M2" \
-    --title "AIME 2026: Qwen3.5-4B vs Base (Raw vs Judged)" \
+        "(a) 4B (Pass@k)" \
+        "(b) 4B-Base (Pass@k)" \
+        "(c) 4B-Base Cot-Pass@k" \
+        "(d) 4B Cot-Pass@k" \
+    --colors     "$C1" "$C2" "$C3" "$C4" \
+    --linestyles "$L1" "$L1" "$L1" "$L1" \
+    --markers    "$M1" "$M2" "$M3" "$M4" \
+    --title "AIME 2026: Qwen3.5-4B vs Base (Pass@k vs Cot-Pass@k)" \
+    --subtitle "Judge Model: Qwen3.5-35B-A3B (Max Tokens: 8192)" \
     --out "${OUT_DIR}/plot2_aime2026.png"
 
 
 echo "[INFO] Plot 3 uretiliyor..."
 python scripts/utils/plot_custom_group.py \
     --paths \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026/summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2025/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_8192/aime2026/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_8192/aime2025/summary.json" \
         "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2025/summary.json" \
         "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026/summary.json" \
     --labels \
@@ -80,21 +85,22 @@ python scripts/utils/plot_custom_group.py \
         "(b) 8192 Tokens / AIME 2025" \
         "(c) 16384 Tokens / AIME 2025" \
         "(d) 16384 Tokens / AIME 2026" \
-    --colors     "$C1" "$C2" "$C1" "$C2" \
-    --linestyles "$L1" "$L1" "$L2" "$L2" \
-    --markers    "$M1" "$M1" "$M2" "$M2" \
+    --colors     "$C1" "$C2" "$C3" "$C4" \
+    --linestyles "$L1" "$L1" "$L1" "$L1" \
+    --markers    "$M1" "$M2" "$M3" "$M4" \
     --title "Max Tokens Effect: 8192 vs 16384" \
+    --subtitle "Judge Model: Qwen3.5-35B-A3B" \
     --out "${OUT_DIR}/plot3_max_tokens_comparison.png"
 
 
 echo "[INFO] Plot 4 uretiliyor..."
 python scripts/utils/plot_custom_group.py \
     --paths \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026_t0.0_k64/summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026_t0.3_k64/summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026/summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026_t1.0_k64/summary.json" \
-        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B/aime2026_t1.2_k64/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026_t0.0_k64/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026_t0.3_k64/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026_t1.0_k64/summary.json" \
+        "results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026_t1.2_k64/summary.json" \
     --labels \
         "(a) Temp = 0.0" \
         "(b) Temp = 0.3" \
@@ -103,8 +109,9 @@ python scripts/utils/plot_custom_group.py \
         "(e) Temp = 1.2" \
     --colors     "$C1" "$C2" "$C3" "$C4" "$C5" \
     --linestyles "$L1" "$L1" "$L1" "$L1" "$L1" \
-    --markers    "o"   "X"   "D"   "^"   "v" \
+    --markers    "$M1" "$M2" "$M3" "$M4" "$M5" \
     --title "Temperature Sweep (Base, AIME 2026)" \
+    --subtitle "Judge Model: Qwen3.5-35B-A3B" \
     --out "${OUT_DIR}/plot4_temperature_sweep.png"
 
 echo "[INFO] Tum grafikler basariyla uretildi ve '$OUT_DIR' klasorune eklendi."

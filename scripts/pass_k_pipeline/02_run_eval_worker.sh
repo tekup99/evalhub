@@ -24,7 +24,7 @@ source "$CONFIG_FILE"
 HF_MODEL_ID=${TARGET_MODEL}
 MODEL_SAFE_NAME=$(basename "$HF_MODEL_ID")
 DYNAMIC_PORT=$((30000 + SLURM_JOB_ID % 10000))
-NUM_GPUS=2
+NUM_GPUS=1
 
 export HF_TOKEN
 export SGLANG_DISABLE_CUDNN_CHECK=1
@@ -45,7 +45,7 @@ echo "[INFO] Waiting for server initialization..."
 while ! curl -s "http://127.0.0.1:${DYNAMIC_PORT}/v1/models" > /dev/null; do
     sleep 10
 done
-sleep 30
+sleep 300
 echo "[INFO] Server is online."
 
 for TASK in $TASKS; do

@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--linestyles", nargs='+', required=True, help="Liste halinde cizgi stilleri (solid/dashed)")
     parser.add_argument("--markers", nargs='+', required=True, help="Liste halinde marker stilleri")
     parser.add_argument("--title", type=str, required=True, help="Grafik basligi")
+    parser.add_argument("--subtitle", type=str, default="", help="Grafik alt basligi (Opsiyonel)")
     parser.add_argument("--out", type=str, required=True, help="Kaydedilecek gorselin yolu")
     args = parser.parse_args()
 
@@ -42,7 +43,6 @@ def main():
         k_vals = sorted(pass_k.keys())
         log2_k_vals = [int(math.log2(k)) for k in k_vals]
         
-        # solid/dashed metnini matplotlib sembolune ceviriyoruz
         ls = style_map.get(args.linestyles[i], "-")
         
         plt.plot(log2_k_vals, [pass_k[k] for k in k_vals], 
@@ -57,7 +57,13 @@ def main():
         plt.close()
         return
 
-    plt.title(args.title, fontweight="bold", fontsize=14)
+    # EĞER SUBTITLE VERİLDİYSE ANA BAŞLIK ÜSTE, ALT BAŞLIK ALTA YAZILIR
+    if args.subtitle:
+        plt.suptitle(args.title, fontweight="bold", fontsize=15, y=0.98)
+        plt.title(args.subtitle, fontsize=11, color="dimgray", pad=10)
+    else:
+        plt.title(args.title, fontweight="bold", fontsize=14)
+
     plt.xlabel(r"$\log_2(k)$", fontsize=12)
     plt.ylabel("Pass@k Score", fontsize=12)
     plt.gca().xaxis.set_major_locator(plt.MaxNLocator(integer=True))

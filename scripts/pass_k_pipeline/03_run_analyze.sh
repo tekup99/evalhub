@@ -20,14 +20,14 @@ fi
 
 # Analiz edilecek modelleri buraya ekleyebilirsin
 MODELS=(
-    "Qwen3.5-4B-Base"
-    "Qwen3.5-4B"
+    "DeepSeek-R1-0528-Qwen3-8B"
+    "Qwen3.5-35B-A3B"
 )
 
 # Analiz edilecek benchmarkları buraya ekleyebilirsin
 BENCHMARKS=(
     "aime2026"
-    "aime2025"
+    #"aime2025"
 )
 
 echo "============================================================"

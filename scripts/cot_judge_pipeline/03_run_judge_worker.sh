@@ -1,8 +1,10 @@
 #!/bin/bash
+#SBATCH --output=logs/%x-%j.out      # Standart çıktı logları
+#SBATCH -e logs/%x-%j.err      
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=48:00:00
+#SBATCH --time=8:00:00
 #SBATCH --gres=gpu:h200:1
 #SBATCH --nodelist=nsdl2
 
@@ -21,6 +23,7 @@ conda activate evalhub_env
 CONFIG_FILE="${SLURM_SUBMIT_DIR}/scripts/configs/cot_judge.env"
 source "$CONFIG_FILE"
 
+# Model isimlerini temizle (ör. path içeriyorsa sadece adını al)
 JUDGE_SAFE_NAME=$(basename "$JUDGE_MODEL_ID")
 BASE_SAFE_NAME=$(basename "$BASE_MODEL_ID")
 
@@ -49,9 +52,13 @@ echo "[INFO] Waiting for the judge server to be ready..."
 while ! curl -s -f "http://127.0.0.1:${PORT}/v1/models" | grep -q "$JUDGE_SAFE_NAME"; do
     sleep 15
 done
-sleep 15
+sleep 300
 echo "[INFO] Judge server is online and responding."
 
+# ---------------------------------------------------------
+# İSTENEN DİNAMİK PATH AYARI
+# Örnek Çıktı Dizini: evalhub/results/judgments/Qwen3.5-4B-Base_evaluated_by_Qwen3.5-35B-A3B_16384/aime2026_t1.0_k64
+# ---------------------------------------------------------
 OUT_DIR="evalhub/results/judgments/${BASE_SAFE_NAME}_evaluated_by_${JUDGE_SAFE_NAME}_${MAX_COMPLETION_TOKENS}/${TASK}_t${TEMPERATURE}_k${K_VAL}"
 mkdir -p "$OUT_DIR"
 
@@ -82,6 +89,7 @@ GEN_ARGS=(
 
 echo "[INFO] Initiating Judge Generation Phase..."
 evalhub gen "${GEN_ARGS[@]}"
+# Not: Yukarıdaki komut $OUT_DIR içerisinde otomatik olarak "math_judge_raw.jsonl" ve "math_judge.jsonl" dosyalarını oluşturacaktır.
 
 echo "[INFO] Initiating Judge Evaluation Phase..."
 evalhub eval \

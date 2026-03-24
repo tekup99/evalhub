@@ -25,6 +25,7 @@ for base_model in ${BASE_MODELS}; do
 
                 for temp in "${TEMP_LIST[@]}"; do
                     BASE_SAFE=$(basename "$base_model")
+                    # Değerlendirilecek base modelin çıktı dosyası
                     INPUT_FILE="data/passatk_filtered/${BASE_SAFE}/${benchmark}${suffix}_corrects.jsonl"
                     
                     echo "[INFO] Submitting -> Benchmark: ${benchmark}${suffix} | Temp: ${temp} | Base: ${BASE_SAFE} | K: ${K_VAL}"

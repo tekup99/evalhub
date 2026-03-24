@@ -1,0 +1,4 @@
+[INFO] Starting job submission process for Pass@K evaluation...
+[INFO] Submitting Slurm job for model: DeepSeek-R1-0528-Qwen3-8B
+Submitted batch job 583400
+[INFO] All evaluation jobs have been submitted to the cluster.
