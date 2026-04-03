@@ -1,0 +1,6 @@
+[INFO] Starting job submission process for LLM-as-a-Judge (Sequential mode with dependencies)...
+[INFO] Submitting -> Benchmark: aime2026_64 | Temp: 0.0 | Base: Qwen3.5-4B-Base | K: 64
+[INFO] Submitted Job ID: 584638 (Waiting for: None)
+[INFO] Submitting -> Benchmark: aime2026_64 | Temp: 0.3 | Base: Qwen3.5-4B-Base | K: 64
+[INFO] Submitted Job ID: 584639 (Waiting for: --dependency=afterany:584638)
+[INFO] All sequential judge jobs have been submitted to the cluster.

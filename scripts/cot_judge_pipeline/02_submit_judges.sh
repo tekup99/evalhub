@@ -13,22 +13,22 @@ IFS=' ' read -r -a TEMP_LIST <<< "${TEMPERATURES}"
 
 mkdir -p logs
 
-echo "[INFO] Initializing LLM-as-a-Judge batch submissions (Sequential mode with dependencies)..."
+echo "[INFO] Starting job submission process for LLM-as-a-Judge (Sequential mode with dependencies)..."
 
 PREV_JOB_ID=""
 
 for base_model in ${BASE_MODELS}; do
+    BASE_SAFE_NAME=$(basename "$base_model")
+    
     for judge_model in ${JUDGE_MODELS}; do
         for benchmark in ${BENCHMARKS}; do
             for suffix in "${SUFFIX_LIST[@]}"; do
                 K_VAL="${suffix#_}"
 
                 for temp in "${TEMP_LIST[@]}"; do
-                    BASE_SAFE=$(basename "$base_model")
-                    # Değerlendirilecek base modelin çıktı dosyası
-                    INPUT_FILE="data/passatk_filtered/${BASE_SAFE}/${benchmark}${suffix}_corrects.jsonl"
+                    INPUT_FILE="data/passatk_filtered/${BASE_SAFE_NAME}/${benchmark}${suffix}_corrects.jsonl"
                     
-                    echo "[INFO] Submitting -> Benchmark: ${benchmark}${suffix} | Temp: ${temp} | Base: ${BASE_SAFE} | K: ${K_VAL}"
+                    echo "[INFO] Submitting -> Benchmark: ${benchmark}${suffix} | Temp: ${temp} | Base: ${BASE_SAFE_NAME} | K: ${K_VAL}"
                     
                     DEPENDENCY_ARG=""
                     if [[ -n "$PREV_JOB_ID" ]]; then
@@ -50,4 +50,4 @@ for base_model in ${BASE_MODELS}; do
     done
 done
 
-echo "[INFO] All sequential judge jobs submitted successfully."
+echo "[INFO] All sequential judge jobs have been submitted to the cluster."

@@ -1,0 +1,6 @@
+-----------------------------------------------------------------------
+Starting Unified EvalHub Pipeline Execution
+Sequence: Base -> Stats -> Extraction -> Judge -> Post-Process
+-----------------------------------------------------------------------
+[PIPELINE] Initializing sequence for: Qwen3.5-0.8B-Base_aime2026_t0.6_max16384_k1
+[SUBMITTED] Pipeline chain for Qwen3.5-0.8B-Base_aime2026_t0.6_max16384_k1. Tail Job: 584744

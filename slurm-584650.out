@@ -1,0 +1,13 @@
+=====================================================================
+ Starting Unified EvalHub Pipeline on Slurm (nscluster)
+ Mode: STRICTLY SEQUENTIAL (Ardışık)
+=====================================================================
+---------------------------------------------------------------------
+[INFO] Queuing sequential workflow for Qwen3.5-0.5B-Base_aime2026_t0.6_max16384_k1...
+  -> Base Eval Job ID: 584651
+  -> Extraction Job ID: 584653
+    -> Judge Eval Job ID (Qwen3.5-0.5B): 584654
+---------------------------------------------------------------------
+ All DAG dependencies successfully submitted in SEQUENTIAL order.
+ Monitor queued and running jobs with: squeue -u $USER
+=====================================================================
