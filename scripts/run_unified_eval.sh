@@ -3,6 +3,7 @@
 # EvalHub Master Orchestrator: Monolithic Pipeline Implementation
 # ==============================================================================
 set -euo pipefail
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 eval "$(conda shell.bash hook)"
 conda activate evalhub_env
@@ -31,9 +32,11 @@ start_server_and_wait() {
     local port="$2"
     
     echo "[INFRA] Initializing sglang server for model: $model_path on port $port"
-    python -m sglang.launch_server --model-path "$model_path" --port "$port" &
-    SERVER_PID=$!
-    
+    python -m sglang.launch_server --model-path "$model_path" --port "$port" \
+        --mem-fraction-static 0.85 \
+        --schedule-conservativeness 1.0 \
+        --chunked-prefill-size 4096 \
+        --max-running-requests 32 &
     echo "[INFRA] Waiting for health check on http://127.0.0.1:$port/health..."
     local retries=0
     local max_retries=60 # 5 minutes total wait
