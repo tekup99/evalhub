@@ -6,11 +6,10 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 
 CONFIG="scripts/unified_pipeline.env"
-if [[ ! -f "$CONFIG" ]]; then
-    echo "[CRITICAL] Configuration file $CONFIG missing."
-    exit 1
+if [[ -f "$CONFIG" ]]; then
+    source "$CONFIG"
 fi
-source "$CONFIG"
+
 
 mkdir -p logs data results plots
 
@@ -108,4 +107,4 @@ HF_TOKEN="$HF_TOKEN",PORT="$PORT" \
             echo "[SUBMITTED] Chain for $RUN_ID. Tail Job ID: $GLOBAL_LAST_JOB_ID"
         done
     done
-done
+donez
