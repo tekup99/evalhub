@@ -37,6 +37,7 @@ start_server_and_wait() {
         --schedule-conservativeness 1.0 \
         --chunked-prefill-size 4096 \
         --max-running-requests 32 &
+    SERVER_PID=$!
     echo "[INFRA] Waiting for health check on http://127.0.0.1:$port/health..."
     local retries=0
     local max_retries=60 # 5 minutes total wait
@@ -63,6 +64,7 @@ run_eval_worker() {
     echo "======================================================================="
     
     start_server_and_wait "$TARGET_MODEL" "$PORT"
+    
 
     # Export API details so evalhub hosted_vllm backend can find the local server
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$PORT/v1"
@@ -70,7 +72,7 @@ run_eval_worker() {
 
     local clean_model=$(basename "$TARGET_MODEL")
     # Base format: results/<model_name>_t<temp>_max<tokens>_k<n>/<benchmark>
-    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}/${BENCHMARK}"
+    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
     echo "[EVAL WORKER] Executing generation phase (evalhub gen)..."
@@ -109,12 +111,11 @@ run_extract_worker() {
     local filtered_dir="data/passatk_filtered/${clean_model}"
     mkdir -p "$filtered_dir"
     
-    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}/${BENCHMARK}"
-    
+    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"    
     # Evalhub outputs
     local results_file="${out_dir}/${BENCHMARK}_results.jsonl"
     local raw_file="${out_dir}/${BENCHMARK}_raw.jsonl"
-    local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}_corrects.jsonl"
+    local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"    
     
     python scripts/cot_judge_pipeline/01_extract_corrects.py \
         --results_file "$results_file" \
@@ -136,8 +137,7 @@ run_judge_worker() {
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
     # CoT format: results/judgments/<target_model>_evaluated_by_<judge_model>_<max_tokens>/<benchmark>_t<temp>_k<n>
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}_k${JUDGE_N_SAMPLES}"
-    mkdir -p "$out_dir"
+local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"    mkdir -p "$out_dir"
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
 
@@ -149,7 +149,7 @@ run_judge_worker() {
         --n-samples "$JUDGE_N_SAMPLES" \
         --max-completion-tokens "$JUDGE_MAX_COMPLETION_TOKENS" \
         --output-dir "$out_dir" \
-        --override-args "$final_override"
+            --override-args "$final_override"
 
     echo "[JUDGE WORKER] Executing judgement evaluation phase..."
     
@@ -161,7 +161,9 @@ run_judge_worker() {
     python -m evalhub.cli eval \
         --tasks "math_judge" \
         --solutions "$judge_solutions_file" \
-        --output-dir "$out_dir"
+        --output-dir "$out_dir" \
+        --override-args "$final_override"
+
 
     echo "[INFRA] Tearing down Judge Model server (PID: $SERVER_PID)..."
     kill "$SERVER_PID" 2>/dev/null || true
@@ -175,8 +177,7 @@ run_post_worker() {
     
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}_k${JUDGE_N_SAMPLES}"
-
+local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"
     local eval_judge_output="${out_dir}/math_judge.jsonl"
     if [[ ! -f "$eval_judge_output" ]]; then
         eval_judge_output="${out_dir}/math_judge_raw.jsonl"
@@ -217,7 +218,7 @@ run_orchestrator() {
         for BENCHMARK in $BENCHMARKS; do
             for B_TEMP in $BASE_TEMPERATURES; do
                 
-                local dynamic_suffix="_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_k${BASE_N_SAMPLES}"
+                local dynamic_suffix="_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}"
                 local run_id="${clean_model}_${BENCHMARK}${dynamic_suffix}"
                 
                 echo "[ORCHESTRATOR] Submitting DAG for Combination: $run_id"
@@ -250,7 +251,7 @@ run_orchestrator() {
                     "$script_path")
 
                 local internal_dep=$extract_job
-                local filtered_file="data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_k${BASE_N_SAMPLES}_corrects.jsonl"
+                local filtered_file="data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
 
                 # --- Phase 3 & 4: CoT Judge & Post-Processing ---
                 for JUDGE in $JUDGE_MODELS; do
