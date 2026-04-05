@@ -3,31 +3,32 @@ import logging
 import argparse
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List, Any
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract correct solutions from benchmark results.")
-    parser.add_argument("--model", type=str, required=True, help="Model name")
-    parser.add_argument("--benchmark", type=str, required=True, help="Benchmark name")
-    parser.add_argument("--suffix", type=str, default="", help="Directory suffix")
+    parser.add_argument("--results_file", type=str, required=True, help="Path to the evaluated results JSONL file")
+    parser.add_argument("--raw_file", type=str, required=True, help="Path to the raw generation JSONL file")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to save the filtered output")
     parser.add_argument("--max_tasks", type=int, default=None, help="Maximum number of tasks to process")
     return parser.parse_args()
 
 def main() -> None:
     args = parse_args()
-    base_dir = Path(f"results/{args.model}/{args.benchmark}{args.suffix}")
-    results_file = base_dir / f"{args.benchmark}{args.suffix}_results.jsonl"
-    raw_file = base_dir / f"{args.benchmark}{args.suffix}_raw.jsonl"
-    
-    out_dir = Path(f"data/passatk_filtered/{args.model}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    output_file = out_dir / f"{args.benchmark}{args.suffix}_corrects.jsonl"
+    results_file = Path(args.results_file)
+    raw_file = Path(args.raw_file)
+    output_file = Path(args.output_file)
 
-    if not results_file.exists() or not raw_file.exists():
-        logger.error("Missing required input files in %s", base_dir)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if not results_file.exists():
+        logger.error("Results file missing: %s", results_file)
+        return
+    if not raw_file.exists():
+        logger.error("Raw file missing: %s", raw_file)
         return
 
     correct_indices: Dict[str, List[int]] = defaultdict(list)

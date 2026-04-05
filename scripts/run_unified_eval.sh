@@ -1,110 +1,313 @@
 #!/bin/bash
+# ==============================================================================
+# EvalHub Master Orchestrator: Monolithic Pipeline Implementation
+# ==============================================================================
 set -euo pipefail
 
-# ------------------------------------------------------------------------------
-# EvalHub Master Orchestrator: Professional Sequential DAG Implementation
-# ------------------------------------------------------------------------------
+eval "$(conda shell.bash hook)"
+conda activate evalhub_env
+export SGLANG_DISABLE_CUDNN_CHECK=1
 
-CONFIG="scripts/unified_pipeline.env"
-if [[ -f "$CONFIG" ]]; then
-    source "$CONFIG"
+# ------------------------------------------------------------------------------
+# 1. Single Source of Truth Configuration
+# ------------------------------------------------------------------------------
+CONFIG_FILE="scripts/unified_pipeline.env"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "[ERROR] Configuration file $CONFIG_FILE not found."
+    exit 1
 fi
 
+source "$CONFIG_FILE"
 
-mkdir -p logs data results plots
+# Determine execution mode (defaults to orchestrator if not provided via SLURM)
+RUN_MODE="${RUN_MODE:-orchestrator}"
 
-echo "-----------------------------------------------------------------------"
-echo "Initializing Pipeline Orchestration"
-echo "-----------------------------------------------------------------------"
-
-GLOBAL_LAST_JOB_ID=""
-
-get_node_config() {
-    [[ -n "$1" ]] && echo "--nodelist=$1" || echo ""
+# ------------------------------------------------------------------------------
+# 2. Shared Utilities
+# ------------------------------------------------------------------------------
+start_server_and_wait() {
+    local model_path="$1"
+    local port="$2"
+    
+    echo "[INFRA] Initializing sglang server for model: $model_path on port $port"
+    python -m sglang.launch_server --model-path "$model_path" --port "$port" &
+    SERVER_PID=$!
+    
+    echo "[INFRA] Waiting for health check on http://127.0.0.1:$port/health..."
+    local retries=0
+    local max_retries=60 # 5 minutes total wait
+    
+    while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
+        sleep 5
+        retries=$((retries + 1))
+        if [[ "$retries" -ge "$max_retries" ]]; then
+            echo "[ERROR] Server failed to pass health check within timeout."
+            kill "$SERVER_PID" 2>/dev/null || true
+            exit 1
+        fi
+    done
+    echo "[INFRA] Server is healthy and accepting requests."
 }
 
-for MODEL in $BASE_MODELS; do
-    CLEAN_MODEL=$(basename "$MODEL")
-    for BENCHMARK in $BENCHMARKS; do
-        for B_TEMP in $BASE_TEMPERATURES; do
-            
-            DYNAMIC_SUFFIX="_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_k${BASE_N_SAMPLES}"
-            RUN_ID="${CLEAN_MODEL}_${BENCHMARK}${DYNAMIC_SUFFIX}"
-            
-            echo "[PIPELINE] Processing Combination: $RUN_ID"
+# ------------------------------------------------------------------------------
+# 3. Worker Modes
+# ------------------------------------------------------------------------------
+run_eval_worker() {
+    echo "======================================================================="
+    echo "[EVAL WORKER] Starting Base Evaluation"
+    echo "Target: $TARGET_MODEL | Benchmark: $BENCHMARK"
+    echo "======================================================================="
+    
+    start_server_and_wait "$TARGET_MODEL" "$PORT"
 
-            # --- PHASE 1: Base Evaluation ---
-            GLOBAL_DEP=""
-            [[ -n "$GLOBAL_LAST_JOB_ID" ]] && GLOBAL_DEP="--dependency=afterany:${GLOBAL_LAST_JOB_ID}"
+    # Export API details so evalhub hosted_vllm backend can find the local server
+    export HOSTED_VLLM_API_BASE="http://127.0.0.1:$PORT/v1"
+    export HOSTED_VLLM_API_KEY="EMPTY"
 
-            BASE_JOB=$(sbatch --parsable ${GLOBAL_DEP} \
-                --job-name="eval_${RUN_ID}" \
-                --output="logs/eval_${RUN_ID}_%j.out" \
-                --error="logs/eval_${RUN_ID}_%j.err" \
-                --ntasks=1 --cpus-per-task=${BASE_SLURM_CPUS} --mem=${BASE_SLURM_MEM} \
-                --gres=${BASE_SLURM_GRES} --time=${BASE_SLURM_TIME} \
-                $(get_node_config "$BASE_SLURM_NODELIST") \
-                --export=ALL,\
-TARGET_MODEL="$MODEL",TASKS="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",\
-TOP_P="$BASE_TOP_P",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",\
-FREQUENCY_PENALTY="$BASE_FREQUENCY_PENALTY",PRESENCE_PENALTY="$BASE_PRESENCE_PENALTY",\
-NUM_WORKERS="$BASE_NUM_WORKERS",TIMEOUT="$BASE_TIMEOUT",\
-STOP="$BASE_STOP",SYSTEM_PROMPT="$BASE_SYSTEM_PROMPT",OVERRIDE_ARGS="$BASE_OVERRIDE_ARGS",\
-ENABLE_MULTITURN="$BASE_ENABLE_MULTITURN",MAX_TURNS="$BASE_MAX_TURNS",\
-TOOL_CONFIG="$BASE_TOOL_CONFIG",CALLBACK="$BASE_CALLBACK",RESUME="$BASE_RESUME",\
-HF_TOKEN="$HF_TOKEN",PORT="$PORT",DYNAMIC_SUFFIX="$DYNAMIC_SUFFIX" \
-                scripts/pass_k_pipeline/02_run_eval_worker.sh)
+    local clean_model=$(basename "$TARGET_MODEL")
+    # Base format: results/<model_name>_t<temp>_max<tokens>_k<n>/<benchmark>
+    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}/${BENCHMARK}"
+    mkdir -p "$out_dir"
+    
+    echo "[EVAL WORKER] Executing generation phase (evalhub gen)..."
+    python -m evalhub.cli gen \
+        --model "hosted_vllm/$TARGET_MODEL" \
+        --tasks "$BENCHMARK" \
+        --temperature "$TEMPERATURE" \
+        --n-samples "$N_SAMPLES" \
+        --max-completion-tokens "$MAX_COMPLETION_TOKENS" \
+        --output-dir "$out_dir"
 
-            # --- PHASE 2: Extraction ---
-            EXTRACT_JOB=$(sbatch --parsable --dependency=afterok:${BASE_JOB} \
-                --job-name="extr_${RUN_ID}" \
-                --output="logs/extr_${RUN_ID}_%j.out" \
-                --ntasks=1 --cpus-per-task=${EXTRACT_SLURM_CPUS} --mem=${EXTRACT_SLURM_MEM} \
-                --time=${EXTRACT_SLURM_TIME} \
-                --export=ALL,MODEL="$MODEL",BENCHMARK="$BENCHMARK",SUFFIX="$DYNAMIC_SUFFIX" \
-                scripts/cot_judge_pipeline/01_run_extraction.sh)
+    # CRITICAL FIX: Ensure the raw outputs are formatted before evaluation
+    local solutions_file="$out_dir/${BENCHMARK}.jsonl"
+    if [[ ! -f "$solutions_file" ]]; then
+        echo "[WARNING] $solutions_file not found. Falling back to raw JSONL."
+        solutions_file="$out_dir/${BENCHMARK}_raw.jsonl"
+    fi
 
-            INTERNAL_DEP=$EXTRACT_JOB
+    echo "[EVAL WORKER] Executing evaluation phase (evalhub eval)..."
+    python -m evalhub.cli eval \
+        --tasks "$BENCHMARK" \
+        --solutions "$solutions_file" \
+        --output-dir "$out_dir"
 
-            # --- PHASE 3: CoT-Judge Evaluation ---
-            FILTERED_FILE="data/passatk_filtered/${CLEAN_MODEL}/${BENCHMARK}${DYNAMIC_SUFFIX}_corrects.jsonl"
-            
-            for JUDGE in $JUDGE_MODELS; do
-                CLEAN_JUDGE=$(basename "$JUDGE")
-                JUDGE_RUN_ID="${RUN_ID}_J-${CLEAN_JUDGE}"
+    echo "[INFRA] Tearing down Base Model server (PID: $SERVER_PID)..."
+    kill "$SERVER_PID" 2>/dev/null || true
+}
 
-                JUDGE_JOB=$(sbatch --parsable --dependency=afterok:${INTERNAL_DEP} \
-                    --job-name="jdg_${JUDGE_RUN_ID}" \
-                    --output="logs/jdg_${JUDGE_RUN_ID}_%j.out" \
-                    --error="logs/jdg_${JUDGE_RUN_ID}_%j.err" \
-                    --ntasks=1 --cpus-per-task=${JUDGE_SLURM_CPUS} --mem=${JUDGE_SLURM_MEM} \
-                    --gres=${JUDGE_SLURM_GRES} --time=${JUDGE_SLURM_TIME} \
-                    $(get_node_config "$JUDGE_SLURM_NODELIST") \
-                    --export=ALL,\
-TOP_P="$JUDGE_TOP_P",MAX_COMPLETION_TOKENS="$JUDGE_MAX_COMPLETION_TOKENS",\
-FREQUENCY_PENALTY="$JUDGE_FREQUENCY_PENALTY",PRESENCE_PENALTY="$JUDGE_PRESENCE_PENALTY",\
-N_SAMPLES="$JUDGE_N_SAMPLES",NUM_WORKERS="$JUDGE_NUM_WORKERS",TIMEOUT="$JUDGE_TIMEOUT",\
-STOP="$JUDGE_STOP",SYSTEM_PROMPT="$JUDGE_SYSTEM_PROMPT",OVERRIDE_ARGS="$JUDGE_OVERRIDE_ARGS",\
-ENABLE_MULTITURN="$JUDGE_ENABLE_MULTITURN",MAX_TURNS="$JUDGE_MAX_TURNS",\
-TOOL_CONFIG="$JUDGE_TOOL_CONFIG",CALLBACK="$JUDGE_CALLBACK",RESUME="$JUDGE_RESUME",\
-HF_TOKEN="$HF_TOKEN",PORT="$PORT" \
-                    scripts/cot_judge_pipeline/03_run_judge_worker.sh \
-                    "$JUDGE" "$MODEL" "$BENCHMARK" "$FILTERED_FILE" "$JUDGE_TEMPERATURES" "$BASE_N_SAMPLES")
+run_extract_worker() {
+    echo "======================================================================="
+    echo "[EXTRACT WORKER] Running Pass@K Extraction"
+    echo "Target: $TARGET_MODEL | Benchmark: $BENCHMARK"
+    echo "======================================================================="
+    
+    local clean_model=$(basename "$TARGET_MODEL")
+    local filtered_dir="data/passatk_filtered/${clean_model}"
+    mkdir -p "$filtered_dir"
+    
+    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}/${BENCHMARK}"
+    
+    # Evalhub outputs
+    local results_file="${out_dir}/${BENCHMARK}_results.jsonl"
+    local raw_file="${out_dir}/${BENCHMARK}_raw.jsonl"
+    local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_k${N_SAMPLES}_corrects.jsonl"
+    
+    python scripts/cot_judge_pipeline/01_extract_corrects.py \
+        --results_file "$results_file" \
+        --raw_file "$raw_file" \
+        --output_file "$output_filtered"
+}
 
-                # --- PHASE 4: Post-Processing ---
-                POST_JOB=$(sbatch --parsable --dependency=afterok:${JUDGE_JOB} \
-                    --job-name="post_${JUDGE_RUN_ID}" \
-                    --output="logs/post_${JUDGE_RUN_ID}_%j.out" \
-                    --ntasks=1 --cpus-per-task=${POST_SLURM_CPUS} --mem=${POST_SLURM_MEM} \
-                    --time=${POST_SLURM_TIME} \
-                    --export=ALL,JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",SUFFIX="$DYNAMIC_SUFFIX" \
-                    scripts/cot_judge_pipeline/04_05_run_postprocess.sh)
+run_judge_worker() {
+    echo "======================================================================="
+    echo "[JUDGE WORKER] Starting CoT Judging"
+    echo "Judge: $JUDGE_MODEL | Target: $TARGET_MODEL | Benchmark: $BENCHMARK"
+    echo "======================================================================="
+    
+    start_server_and_wait "$JUDGE_MODEL" "$PORT"
+
+    export HOSTED_VLLM_API_BASE="http://127.0.0.1:$PORT/v1"
+    export HOSTED_VLLM_API_KEY="EMPTY"
+
+    local clean_target=$(basename "$TARGET_MODEL")
+    local clean_judge=$(basename "$JUDGE_MODEL")
+    # CoT format: results/judgments/<target_model>_evaluated_by_<judge_model>_<max_tokens>/<benchmark>_t<temp>_k<n>
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}_k${JUDGE_N_SAMPLES}"
+    mkdir -p "$out_dir"
+
+    local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
+
+    echo "[JUDGE WORKER] Executing judgement generation phase..."
+    python -m evalhub.cli gen \
+        --model "hosted_vllm/$JUDGE_MODEL" \
+        --tasks "math_judge" \
+        --temperature "$JUDGE_TEMPERATURES" \
+        --n-samples "$JUDGE_N_SAMPLES" \
+        --max-completion-tokens "$JUDGE_MAX_COMPLETION_TOKENS" \
+        --output-dir "$out_dir" \
+        --override-args "$final_override"
+
+    echo "[JUDGE WORKER] Executing judgement evaluation phase..."
+    
+    local judge_solutions_file="$out_dir/math_judge.jsonl"
+    if [[ ! -f "$judge_solutions_file" ]]; then
+        judge_solutions_file="$out_dir/math_judge_raw.jsonl"
+    fi
+
+    python -m evalhub.cli eval \
+        --tasks "math_judge" \
+        --solutions "$judge_solutions_file" \
+        --output-dir "$out_dir"
+
+    echo "[INFRA] Tearing down Judge Model server (PID: $SERVER_PID)..."
+    kill "$SERVER_PID" 2>/dev/null || true
+}
+
+run_post_worker() {
+    echo "======================================================================="
+    echo "[POST WORKER] Post-Processing Judge Outputs"
+    echo "Target: $TARGET_MODEL | Judge: $JUDGE_MODEL"
+    echo "======================================================================="
+    
+    local clean_target=$(basename "$TARGET_MODEL")
+    local clean_judge=$(basename "$JUDGE_MODEL")
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}_k${JUDGE_N_SAMPLES}"
+
+    local eval_judge_output="${out_dir}/math_judge.jsonl"
+    if [[ ! -f "$eval_judge_output" ]]; then
+        eval_judge_output="${out_dir}/math_judge_raw.jsonl"
+    fi
+
+    local agg_output="${out_dir}/math_judge_aggregated.jsonl"
+    local metrics_output="${out_dir}/math_judge_metrics.json"
+
+    echo "[POST WORKER] Aggregating votes..."
+    python scripts/cot_judge_pipeline/04_aggregate_votes.py \
+        --input "$eval_judge_output" \
+        --output "$agg_output"
+
+    echo "[POST WORKER] Applying final metrics..."
+    python scripts/cot_judge_pipeline/05_apply_metrics.py \
+        --input "$agg_output" \
+        --output "$metrics_output"
+}
+
+# ------------------------------------------------------------------------------
+# 4. Orchestrator Logic (DAG Submission)
+# ------------------------------------------------------------------------------
+run_orchestrator() {
+    echo "======================================================================="
+    echo "Initializing Unified Pipeline Orchestrator (Monolithic Mode)"
+    echo "======================================================================="
+
+    mkdir -p logs results/judgments data/passatk_filtered plots
+
+    local script_path
+    script_path=$(realpath "$0")
+    local global_last_job_id=""
+
+    for MODEL in $BASE_MODELS; do
+        local clean_model
+        clean_model=$(basename "$MODEL")
+        
+        for BENCHMARK in $BENCHMARKS; do
+            for B_TEMP in $BASE_TEMPERATURES; do
                 
-                INTERNAL_DEP=$POST_JOB
+                local dynamic_suffix="_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_k${BASE_N_SAMPLES}"
+                local run_id="${clean_model}_${BENCHMARK}${dynamic_suffix}"
+                
+                echo "[ORCHESTRATOR] Submitting DAG for Combination: $run_id"
+
+                # --- Phase 1: Base Evaluation ---
+                local global_dep=""
+                if [[ -n "$global_last_job_id" ]]; then
+                    global_dep="--dependency=afterany:${global_last_job_id}"
+                fi
+
+                local base_job
+                base_job=$(sbatch --parsable $global_dep \
+                    --job-name="eval_${run_id}" \
+                    --output="logs/eval_${run_id}_%j.out" \
+                    --error="logs/eval_${run_id}_%j.err" \
+                    --ntasks=1 --cpus-per-task="${BASE_SLURM_CPUS}" --mem="${BASE_SLURM_MEM}" \
+                    --gres="${BASE_SLURM_GRES}" --time="${BASE_SLURM_TIME}" \
+                    $([[ -n "$BASE_SLURM_NODELIST" ]] && echo "--nodelist=$BASE_SLURM_NODELIST") \
+                    --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
+                    "$script_path")
+
+                # --- Phase 2: Extraction ---
+                local extract_job
+                extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
+                    --job-name="extr_${run_id}" \
+                    --output="logs/extr_${run_id}_%j.out" \
+                    --ntasks=1 --cpus-per-task="${EXTRACT_SLURM_CPUS}" --mem="${EXTRACT_SLURM_MEM}" \
+                    --time="${EXTRACT_SLURM_TIME}" \
+                    --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
+                    "$script_path")
+
+                local internal_dep=$extract_job
+                local filtered_file="data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_k${BASE_N_SAMPLES}_corrects.jsonl"
+
+                # --- Phase 3 & 4: CoT Judge & Post-Processing ---
+                for JUDGE in $JUDGE_MODELS; do
+                    local clean_judge
+                    clean_judge=$(basename "$JUDGE")
+                    local judge_run_id="${run_id}_J-${clean_judge}"
+
+                    local judge_job
+                    judge_job=$(sbatch --parsable --dependency=afterok:"${internal_dep}" \
+                        --job-name="jdg_${judge_run_id}" \
+                        --output="logs/jdg_${judge_run_id}_%j.out" \
+                        --error="logs/jdg_${judge_run_id}_%j.err" \
+                        --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
+                        --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
+                        $([[ -n "$JUDGE_SLURM_NODELIST" ]] && echo "--nodelist=$JUDGE_SLURM_NODELIST") \
+                        --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",FILTERED_FILE="$filtered_file" \
+                        "$script_path")
+
+                    local post_job
+                    post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                        --job-name="post_${judge_run_id}" \
+                        --output="logs/post_${judge_run_id}_%j.out" \
+                        --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
+                        --time="${POST_SLURM_TIME}" \
+                        --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK" \
+                        "$script_path")
+                    
+                    internal_dep=$post_job
+                done
+                
+                global_last_job_id=$internal_dep
+                echo "[ORCHESTRATOR] DAG Submitted. Tail Job ID: $global_last_job_id"
             done
-            
-            GLOBAL_LAST_JOB_ID=$INTERNAL_DEP
-            echo "[SUBMITTED] Chain for $RUN_ID. Tail Job ID: $GLOBAL_LAST_JOB_ID"
         done
     done
-donez
+}
+
+# ------------------------------------------------------------------------------
+# 5. Script Entry Point Routing
+# ------------------------------------------------------------------------------
+case "$RUN_MODE" in
+    orchestrator)
+        run_orchestrator
+        ;;
+    eval_worker)
+        run_eval_worker
+        ;;
+    extract_worker)
+        run_extract_worker
+        ;;
+    judge_worker)
+        run_judge_worker
+        ;;
+    post_worker)
+        run_post_worker
+        ;;
+    *)
+        echo "[ERROR] Unknown RUN_MODE mapping: $RUN_MODE"
+        exit 1
+        ;;
+esac
+
+exit 0
