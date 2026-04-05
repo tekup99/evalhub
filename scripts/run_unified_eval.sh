@@ -137,7 +137,8 @@ run_judge_worker() {
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
     # CoT format: results/judgments/<target_model>_evaluated_by_<judge_model>_<max_tokens>/<benchmark>_t<temp>_k<n>
-local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"    mkdir -p "$out_dir"
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"   
+    mkdir -p "$out_dir"
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
 
@@ -177,24 +178,40 @@ run_post_worker() {
     
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
-local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"
+    
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"
+    
     local eval_judge_output="${out_dir}/math_judge.jsonl"
-    if [[ ! -f "$eval_judge_output" ]]; then
-        eval_judge_output="${out_dir}/math_judge_raw.jsonl"
-    fi
+    [[ ! -f "$eval_judge_output" ]] && eval_judge_output="${out_dir}/math_judge_raw.jsonl"
 
-    local agg_output="${out_dir}/math_judge_aggregated.jsonl"
-    local metrics_output="${out_dir}/math_judge_metrics.json"
+    local majority_file="${out_dir}/math_judge_majority.jsonl"
+
+    local base_results_path="results/${clean_target}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
+    local base_results_file="${base_results_path}/${BENCHMARK}_results.jsonl"
+
+    local judged_results_file="${out_dir}/${BENCHMARK}_results_judged.jsonl"
+    local summary_file="${out_dir}/summary.json"
 
     echo "[POST WORKER] Aggregating votes..."
     python scripts/cot_judge_pipeline/04_aggregate_votes.py \
-        --input "$eval_judge_output" \
-        --output "$agg_output"
+        --input_file "$eval_judge_output" \
+        --output_file "$majority_file"
 
-    echo "[POST WORKER] Applying final metrics..."
-    python scripts/cot_judge_pipeline/05_apply_metrics.py \
-        --input "$agg_output" \
-        --output "$metrics_output"
+    if [[ -f "$base_results_file" ]]; then
+        echo "[POST WORKER] Applying CoT filters to base results..."
+        echo "Source: $base_results_file"
+        
+        python scripts/cot_judge_pipeline/05_apply_metrics.py \
+            --base_results_file "$base_results_file" \
+            --judge_majority_file "$majority_file" \
+            --output_file "$judged_results_file" \
+            --summary_file "$summary_file"
+            
+        echo "[POST WORKER] Success! Judged results saved to: $judged_results_file"
+    else
+        echo "[ERROR] Base results file not found at: $base_results_file"
+        exit 1
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -276,7 +293,7 @@ run_orchestrator() {
                         --output="logs/post_${judge_run_id}_%j.out" \
                         --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
                         --time="${POST_SLURM_TIME}" \
-                        --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK" \
+                        --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
                         "$script_path")
                     
                     internal_dep=$post_job
