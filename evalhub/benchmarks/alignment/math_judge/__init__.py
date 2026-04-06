@@ -53,9 +53,14 @@ class MathJudgeDataset(MathDataset):
     """Dataset class for LLM-as-a-Judge on generated math solutions."""
 
     def __init__(self, name: str = MATH_JUDGE, meta_data: dict[str, Any] = None, **kwargs):
-        if meta_data is None:
-            meta_data = MATH_JUDGE_META_DATA
-        super().__init__(name, meta_data=meta_data, **kwargs)
+            if meta_data is None:
+                meta_data = MATH_JUDGE_META_DATA.copy()
+                
+            file_path = meta_data.get("file_path")
+            if file_path and os.path.exists(file_path):
+                meta_data["file_mtime"] = os.path.getmtime(file_path)
+                
+            super().__init__(name, meta_data=meta_data, **kwargs)
 
     def load_tasks(self) -> None:
         """Load tasks from the local JSONL file and dynamically fetch original questions."""
