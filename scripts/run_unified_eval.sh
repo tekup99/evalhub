@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # EvalHub Master Orchestrator: Monolithic Pipeline Implementation
-# Optimized for 2x H200 (nsdl2) & TP=2
+# Optimized for 2x H200 (nsdl2) | Dynamic TP/DP Injection
 # ==============================================================================
 set -euo pipefail
 
@@ -28,33 +28,39 @@ RUN_MODE="${RUN_MODE:-orchestrator}"
 start_server_and_wait() {
     local model_path="$1"
     local port="$2"
+    local parallelism_args="$3" # Accepts "--dp 2" or "--tp 2"
+    local max_running_reqs="$4" 
     
     echo "[INFO] Initializing sglang server for model: $model_path on port $port"
-    # Added --disable-custom-all-reduce to fix Hopper (H200) IPC buffer errors during CUDA graph capture
+    echo "[INFO] Hardware Strategy: $parallelism_args"
+    
+    # We purposefully do not redirect output to /dev/null or an external file.
+    # Output streams directly to Slurm's stdout/stderr for immediate visibility.
     python -m sglang.launch_server --model-path "$model_path" --port "$port" \
-        --tp 2 \
+        $parallelism_args \
         --mem-fraction-static 0.85 \
         --schedule-conservativeness 1.0 \
         --chunked-prefill-size 8192 \
-        --max-running-requests 160 \
+        --max-running-requests "$max_running_reqs" \
         --disable-custom-all-reduce &
     
     SERVER_PID=$!
     local retries=0
-    local max_retries=120 # Increased wait time for large model weight loading
+    local max_retries=120 
     
     echo "[INFO] Waiting for server healthcheck..."
     while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
-        # Arka plandaki Python SGLang süreci çökerse anında hatayı bas
+        # Robust process check
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "[ERROR] SGLang server process ($SERVER_PID) died unexpectedly during initialization." >&2
             exit 1
         fi
         
         sleep 5
+        # Avoid ((retries++)) which evaluates to 0 and trips set -e
         retries=$((retries + 1))
         
-        if [[ "$retries" -ge "$max_retries" ]]; then
+        if [ "$retries" -ge "$max_retries" ]; then
             echo "[ERROR] Server failed health check timeout on port $port." >&2
             kill "$SERVER_PID" 2>/dev/null || true
             exit 1
@@ -81,13 +87,13 @@ run_eval_worker() {
     
     trap cleanup_server_and_cache EXIT
 
-    start_server_and_wait "$TARGET_MODEL" "$worker_port"
+    # Base model (4B): Use DP=2 to blast through N_SAMPLES=64
+    start_server_and_wait "$TARGET_MODEL" "$worker_port" "--dp 2" "256"
     
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
 
-    local clean_model
-    clean_model=$(basename "$TARGET_MODEL")
+    local clean_model=$(basename "$TARGET_MODEL")
     local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
@@ -96,6 +102,7 @@ run_eval_worker() {
         --tasks "$BENCHMARK"
         --temperature "$TEMPERATURE"
         --n-samples "$N_SAMPLES"
+        --num-workers "$BASE_NUM_WORKERS"
         --max-completion-tokens "$MAX_COMPLETION_TOKENS"
         --output-dir "$out_dir"
     )
@@ -128,8 +135,7 @@ run_eval_worker() {
 run_extract_worker() {
     echo "[INFO] --- Running Pass@K Extraction ---"
     
-    local clean_model
-    clean_model=$(basename "$TARGET_MODEL")
+    local clean_model=$(basename "$TARGET_MODEL")
     local filtered_dir="data/passatk_filtered/${clean_model}"
     mkdir -p "$filtered_dir"
     
@@ -153,17 +159,15 @@ run_judge_worker() {
 
     trap cleanup_server_and_cache EXIT
 
-    start_server_and_wait "$JUDGE_MODEL" "$worker_port"
+    # Judge model (35B): Use TP=2 to aggregate VRAM for heavy KV Cache at high temperatures
+    start_server_and_wait "$JUDGE_MODEL" "$worker_port" "--tp 2" "160"
 
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
 
-    local clean_target
-    clean_target=$(basename "$TARGET_MODEL")
-    local clean_judge
-    clean_judge=$(basename "$JUDGE_MODEL")
-    # Using injected JUDGE_TEMP instead of global JUDGE_TEMPERATURES to handle array sweeps properly
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    local clean_target=$(basename "$TARGET_MODEL")
+    local clean_judge=$(basename "$JUDGE_MODEL")
+    local out_dir="results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
@@ -177,6 +181,7 @@ run_judge_worker() {
         --tasks "math_judge"
         --temperature "$JUDGE_TEMP"
         --n-samples "$JUDGE_N_SAMPLES"
+        --num-workers "$JUDGE_NUM_WORKERS"
         --max-completion-tokens "$JUDGE_MAX_COMPLETION_TOKENS"
         --output-dir "$out_dir"
         --override-args "$final_override"
@@ -206,13 +211,10 @@ run_judge_worker() {
 run_post_worker() {
     echo "[INFO] --- Post-Processing Judge Outputs & Plotting ---"
     
-    local clean_target
-    clean_target=$(basename "$TARGET_MODEL")
-    local clean_judge
-    clean_judge=$(basename "$JUDGE_MODEL")
+    local clean_target=$(basename "$TARGET_MODEL")
+    local clean_judge=$(basename "$JUDGE_MODEL")
     
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
-    
+    local out_dir="results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
     rm -f "${out_dir}/math_judge_summary.json"
 
     local eval_judge_output="${out_dir}/math_judge.jsonl"
@@ -265,13 +267,11 @@ run_orchestrator() {
 
     mkdir -p logs results/judgments data/passatk_filtered plots data/cache
 
-    local script_path
-    script_path=$(realpath "$0")
+    local script_path=$(realpath "$0")
     local global_last_job_id=""
 
     for MODEL in $BASE_MODELS; do
-        local clean_model
-        clean_model=$(basename "$MODEL")
+        local clean_model=$(basename "$MODEL")
         
         for BENCHMARK in $BENCHMARKS; do
             for B_TEMP in $BASE_TEMPERATURES; do
@@ -282,8 +282,7 @@ run_orchestrator() {
                 local global_dep=""
                 [[ -n "$global_last_job_id" ]] && global_dep="--dependency=afterany:${global_last_job_id}"
 
-                local base_job
-                base_job=$(sbatch --parsable $global_dep \
+                local base_job=$(sbatch --parsable $global_dep \
                     --job-name="eval_${run_id}" \
                     --output="logs/eval_${run_id}_%j.out" \
                     --error="logs/eval_${run_id}_%j.err" \
@@ -293,8 +292,7 @@ run_orchestrator() {
                     --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
                     "$script_path")
 
-                local extract_job
-                extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
+                local extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
                     --job-name="extr_${run_id}" \
                     --output="logs/extr_${run_id}_%j.out" \
                     --ntasks=1 --cpus-per-task="${EXTRACT_SLURM_CPUS}" --mem="${EXTRACT_SLURM_MEM}" \
@@ -306,14 +304,11 @@ run_orchestrator() {
 
                 local all_post_jobs=()
                 for JUDGE in $JUDGE_MODELS; do
-                    # Added the temperature iteration loop here
                     for J_TEMP in $JUDGE_TEMPERATURES; do
-                        local clean_judge
-                        clean_judge=$(basename "$JUDGE")
+                        local clean_judge=$(basename "$JUDGE")
                         local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
 
-                        local judge_job
-                        judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
+                        local judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
                             --job-name="jdg_${judge_run_id}" \
                             --output="logs/jdg_${judge_run_id}_%j.out" \
                             --error="logs/jdg_${judge_run_id}_%j.err" \
@@ -323,8 +318,7 @@ run_orchestrator() {
                             --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP" \
                             "$script_path")
 
-                        local post_job
-                        post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                        local post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
                             --job-name="post_${judge_run_id}" \
                             --output="logs/post_${judge_run_id}_%j.out" \
                             --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \

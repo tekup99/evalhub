@@ -17,12 +17,14 @@ eggs/
 lib/
 lib64/
 parts/
+plots/
 sdist/
 var/
 wheels/
 share/python-wheels/
 results/
 results2/
+data2/
 logs/
 data/
 comparison_plots/
