@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # EvalHub Master Orchestrator: Monolithic Pipeline Implementation
+# Optimized for 2x H200 (nsdl2) & TP=2
 # ==============================================================================
 set -euo pipefail
 
@@ -29,19 +30,30 @@ start_server_and_wait() {
     local port="$2"
     
     echo "[INFO] Initializing sglang server for model: $model_path on port $port"
+    # Added --disable-custom-all-reduce to fix Hopper (H200) IPC buffer errors during CUDA graph capture
     python -m sglang.launch_server --model-path "$model_path" --port "$port" \
+        --tp 2 \
         --mem-fraction-static 0.85 \
         --schedule-conservativeness 1.0 \
-        --chunked-prefill-size 4096 \
-        --max-running-requests 32 &
+        --chunked-prefill-size 8192 \
+        --max-running-requests 160 \
+        --disable-custom-all-reduce &
     
     SERVER_PID=$!
     local retries=0
-    local max_retries=60
+    local max_retries=120 # Increased wait time for large model weight loading
     
+    echo "[INFO] Waiting for server healthcheck..."
     while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
+        # Arka plandaki Python SGLang süreci çökerse anında hatayı bas
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "[ERROR] SGLang server process ($SERVER_PID) died unexpectedly during initialization." >&2
+            exit 1
+        fi
+        
         sleep 5
-        ((retries++))
+        retries=$((retries + 1))
+        
         if [[ "$retries" -ge "$max_retries" ]]; then
             echo "[ERROR] Server failed health check timeout on port $port." >&2
             kill "$SERVER_PID" 2>/dev/null || true
@@ -79,7 +91,6 @@ run_eval_worker() {
     local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
-    # Tüm parametreleri güvenli bir dizi (array) içine topluyoruz
     local cmd_args=(
         --model "hosted_vllm/$TARGET_MODEL"
         --tasks "$BENCHMARK"
@@ -89,7 +100,6 @@ run_eval_worker() {
         --output-dir "$out_dir"
     )
 
-    # .env'deki opsiyonel parametreler doluysa komuta ekle
     [[ "${BASE_RESUME:-false}" == "true" ]] && cmd_args+=(--resume)
     [[ -n "${BASE_TOP_P:-}" ]] && cmd_args+=(--top-p "$BASE_TOP_P")
     [[ -n "${BASE_FREQUENCY_PENALTY:-}" ]] && cmd_args+=(--frequency-penalty "$BASE_FREQUENCY_PENALTY")
@@ -105,7 +115,6 @@ run_eval_worker() {
     [[ ! -f "$solutions_file" ]] && solutions_file="$out_dir/${BENCHMARK}_raw.jsonl"
 
     echo "[INFO] Executing evaluation phase..."
-    # Override_args eval kısmında da lazımsa ekliyoruz
     local eval_args=(
         --tasks "$BENCHMARK"
         --solutions "$solutions_file"
@@ -153,7 +162,8 @@ run_judge_worker() {
     clean_target=$(basename "$TARGET_MODEL")
     local clean_judge
     clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"   
+    # Using injected JUDGE_TEMP instead of global JUDGE_TEMPERATURES to handle array sweeps properly
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
@@ -162,11 +172,10 @@ run_judge_worker() {
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
     
-    # Judge için parametreleri topluyoruz
     local cmd_args=(
         --model "hosted_vllm/$JUDGE_MODEL"
         --tasks "math_judge"
-        --temperature "$JUDGE_TEMPERATURES"
+        --temperature "$JUDGE_TEMP"
         --n-samples "$JUDGE_N_SAMPLES"
         --max-completion-tokens "$JUDGE_MAX_COMPLETION_TOKENS"
         --output-dir "$out_dir"
@@ -202,7 +211,7 @@ run_post_worker() {
     local clean_judge
     clean_judge=$(basename "$JUDGE_MODEL")
     
-    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMPERATURES}"
+    local out_dir="results/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
     
     rm -f "${out_dir}/math_judge_summary.json"
 
@@ -297,31 +306,34 @@ run_orchestrator() {
 
                 local all_post_jobs=()
                 for JUDGE in $JUDGE_MODELS; do
-                    local clean_judge
-                    clean_judge=$(basename "$JUDGE")
-                    local judge_run_id="${run_id}_J-${clean_judge}"
+                    # Added the temperature iteration loop here
+                    for J_TEMP in $JUDGE_TEMPERATURES; do
+                        local clean_judge
+                        clean_judge=$(basename "$JUDGE")
+                        local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
 
-                    local judge_job
-                    judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
-                        --job-name="jdg_${judge_run_id}" \
-                        --output="logs/jdg_${judge_run_id}_%j.out" \
-                        --error="logs/jdg_${judge_run_id}_%j.err" \
-                        --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
-                        --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
-                        $([[ -n "$JUDGE_SLURM_NODELIST" ]] && echo "--nodelist=$JUDGE_SLURM_NODELIST") \
-                        --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file" \
-                        "$script_path")
+                        local judge_job
+                        judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
+                            --job-name="jdg_${judge_run_id}" \
+                            --output="logs/jdg_${judge_run_id}_%j.out" \
+                            --error="logs/jdg_${judge_run_id}_%j.err" \
+                            --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
+                            --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
+                            $([[ -n "$JUDGE_SLURM_NODELIST" ]] && echo "--nodelist=$JUDGE_SLURM_NODELIST") \
+                            --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP" \
+                            "$script_path")
 
-                    local post_job
-                    post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
-                        --job-name="post_${judge_run_id}" \
-                        --output="logs/post_${judge_run_id}_%j.out" \
-                        --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
-                        --time="${POST_SLURM_TIME}" \
-                        --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
-                        "$script_path")
-                    
-                    all_post_jobs+=("$post_job")
+                        local post_job
+                        post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                            --job-name="post_${judge_run_id}" \
+                            --output="logs/post_${judge_run_id}_%j.out" \
+                            --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
+                            --time="${POST_SLURM_TIME}" \
+                            --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP" \
+                            "$script_path")
+                        
+                        all_post_jobs+=("$post_job")
+                    done
                 done
                 
                 global_last_job_id=$(IFS=, ; echo "${all_post_jobs[*]}")
