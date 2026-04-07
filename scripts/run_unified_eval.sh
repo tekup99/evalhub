@@ -5,7 +5,7 @@
 # ==============================================================================
 set -euo pipefail
 
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
 export SGLANG_DISABLE_CUDNN_CHECK=1
 
 eval "$(conda shell.bash hook)"
@@ -28,7 +28,7 @@ RUN_MODE="${RUN_MODE:-orchestrator}"
 start_server_and_wait() {
     local model_path="$1"
     local port="$2"
-    local parallelism_args="$3" # Accepts "--dp 2" or "--tp 2"
+    local parallelism_args="$3" # Accepts "--dp 2" or "--tp 1"
     local max_running_reqs="$4" 
     
     echo "[INFO] Initializing sglang server for model: $model_path on port $port"
@@ -160,7 +160,7 @@ run_judge_worker() {
     trap cleanup_server_and_cache EXIT
 
     # Judge model (35B): Use TP=2 to aggregate VRAM for heavy KV Cache at high temperatures
-    start_server_and_wait "$JUDGE_MODEL" "$worker_port" "--tp 2" "160"
+    start_server_and_wait "$JUDGE_MODEL" "$worker_port" "--tp 1" "160"
 
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"

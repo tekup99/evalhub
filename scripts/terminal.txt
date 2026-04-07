@@ -1,69 +1,34 @@
-# 1. Ortam değişkenlerini oku
+# 1. Çevresel değişkenleri (GPU, RAM vb.) .env dosyasından çekiyoruz
 source scripts/unified_pipeline.env
 
-# 2. Base model için geçerli hedef parametreleri
-MODEL="Qwen/Qwen3.5-4B-Base"
-JUDGE="Qwen/Qwen3.5-35B-A3B"
+# 2. Değişkenleri tanımlıyoruz
+TARGET_MODEL="Qwen3.5-4B-Base"
+JUDGE_MODEL="google/gemma-4-26B-A4B-it"
 BENCHMARK="aime2026"
-B_TEMP="0.6"
-BASE_MAX_COMPLETION_TOKENS="16384"
+TEMPERATURE="0.6"
+JUDGE_TEMP="0.6"
+MAX_COMPLETION_TOKENS="16384"
+FILTERED_FILE="data/passatk_filtered/Qwen3.5-4B-Base/aime2026_t0.6_max16384_corrects.jsonl"
 
-# 3. Yolları belirle
-clean_model=$(basename "$MODEL")
-clean_judge=$(basename "$JUDGE")
-filtered_file="data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
+# 3. Judge Worker'ı sbatch ile başlatıp Job ID'sini alıyoruz
+judge_job=$(sbatch --parsable \
+    --job-name="jdg_manual" \
+    --output="logs/jdg_manual_%j.out" \
+    --error="logs/jdg_manual_%j.err" \
+    --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
+    --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
+    --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE_MODEL",TARGET_MODEL="$TARGET_MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$TEMPERATURE",MAX_COMPLETION_TOKENS="$MAX_COMPLETION_TOKENS",FILTERED_FILE="$FILTERED_FILE",JUDGE_TEMP="$JUDGE_TEMP" \
+    scripts/run_unified_eval.sh)
 
-# 4. Zincirleme işlerin başlangıç noktası (Kullanıcının beklemek istediği mevcut Job ID)
-LAST_JOB_ID="585519"
+echo "Baslatilan Judge Job ID: $judge_job"
 
-# 5. Tüm sıcaklıklar üzerinden katı sıralı döngü (Biri bitmeden diğeri başlamayacak)
-for J_TEMP in $JUDGE_TEMPERATURES; do
-    judge_run_id="${clean_model}_${BENCHMARK}_J-${clean_judge}_t${J_TEMP}"
-    
-    if [ "$J_TEMP" == "0.0" ] || [ "$J_TEMP" == "0.3" ]; then
-        # SADECE POST İŞLEMİ (0.0 ve 0.3 İÇİN)
-        echo "[INFO] Temp: $J_TEMP için SADECE Post fazı kuyruğa ekleniyor (Önceki iş: $LAST_JOB_ID)..."
-        
-        post_job=$(sbatch --parsable --dependency=afterok:"${LAST_JOB_ID}" \
-            --job-name="post_${judge_run_id}" \
-            --output="logs/post_${judge_run_id}_%j.out" \
-            --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
-            --time="${POST_SLURM_TIME}" \
-            --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP" \
-            scripts/run_unified_eval.sh)
-            
-        # Sonraki işin beklemesi gereken ID'yi güncelle
-        LAST_JOB_ID=$post_job
-        echo " -> Post Job ID: $post_job"
-        
-    else
-        # JUDGE + POST İŞLEMİ (0.6, 0.9, 1.2 vb. DİĞER SICAKLIKLAR İÇİN)
-        echo "[INFO] Temp: $J_TEMP için Judge ve Post fazları kuyruğa ekleniyor (Önceki iş: $LAST_JOB_ID)..."
-        
-        # Judge işini önceki işe bağla
-        judge_job=$(sbatch --parsable --dependency=afterok:"${LAST_JOB_ID}" \
-            --job-name="jdg_${judge_run_id}" \
-            --output="logs/jdg_${judge_run_id}_%j.out" \
-            --error="logs/jdg_${judge_run_id}_%j.err" \
-            --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
-            --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
-            --nodelist="${JUDGE_SLURM_NODELIST}" \
-            --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP" \
-            scripts/run_unified_eval.sh)
-            
-        LAST_JOB_ID=$judge_job
-        
-        # Post işini hemen biten kendi Judge işine bağla
-        post_job=$(sbatch --parsable --dependency=afterok:"${LAST_JOB_ID}" \
-            --job-name="post_${judge_run_id}" \
-            --output="logs/post_${judge_run_id}_%j.out" \
-            --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
-            --time="${POST_SLURM_TIME}" \
-            --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP" \
-            scripts/run_unified_eval.sh)
-            
-        # Döngüdeki bir sonraki sıcaklığın (eğer varsa) beklemesi gereken ID'yi güncelle
-        LAST_JOB_ID=$post_job
-        echo " -> Judge Job ID: $judge_job | Post Job ID: $post_job"
-    fi
-done
+# 4. Post Worker'ı Judge işlemine bağımlı (--dependency=afterok) olarak başlatıyoruz
+post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+    --job-name="post_manual" \
+    --output="logs/post_manual_%j.out" \
+    --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
+    --time="${POST_SLURM_TIME}" \
+    --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE_MODEL",TARGET_MODEL="$TARGET_MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$TEMPERATURE",MAX_COMPLETION_TOKENS="$MAX_COMPLETION_TOKENS",JUDGE_TEMP="$JUDGE_TEMP" \
+    scripts/run_unified_eval.sh)
+
+echo "Baslatilan Post Job ID: $post_job (Judge bitmesini bekleyecek)"
