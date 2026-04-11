@@ -1,11 +1,10 @@
 #!/bin/bash
 # ==============================================================================
 # EvalHub Master Orchestrator: Monolithic Pipeline Implementation
-# Optimized for 2x H200 (nsdl2) | Dynamic TP/DP Injection
 # ==============================================================================
 set -euo pipefail
 
-export PYTORCH_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export SGLANG_DISABLE_CUDNN_CHECK=1
 
 eval "$(conda shell.bash hook)"
@@ -28,20 +27,22 @@ RUN_MODE="${RUN_MODE:-orchestrator}"
 start_server_and_wait() {
     local model_path="$1"
     local port="$2"
-    local parallelism_args="$3" # Accepts "--dp 2" or "--tp 1"
-    local max_running_reqs="$4" 
+    local p_type="$3"         # e.g. "dp" or "tp"
+    local p_count="$4"        # e.g. "2"
+    local mem_frac="$5"
+    local cons="$6"
+    local chunk_prefill="$7"
+    local max_reqs="$8"
     
     echo "[INFO] Initializing sglang server for model: $model_path on port $port"
-    echo "[INFO] Hardware Strategy: $parallelism_args"
+    echo "[INFO] Hardware Strategy: --$p_type $p_count"
     
-    # We purposefully do not redirect output to /dev/null or an external file.
-    # Output streams directly to Slurm's stdout/stderr for immediate visibility.
     python -m sglang.launch_server --model-path "$model_path" --port "$port" \
-        $parallelism_args \
-        --mem-fraction-static 0.85 \
-        --schedule-conservativeness 1.0 \
-        --chunked-prefill-size 8192 \
-        --max-running-requests "$max_running_reqs" \
+        --"$p_type" "$p_count" \
+        --mem-fraction-static "$mem_frac" \
+        --schedule-conservativeness "$cons" \
+        --chunked-prefill-size "$chunk_prefill" \
+        --max-running-requests "$max_reqs" \
         --disable-custom-all-reduce &
     
     SERVER_PID=$!
@@ -50,14 +51,12 @@ start_server_and_wait() {
     
     echo "[INFO] Waiting for server healthcheck..."
     while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
-        # Robust process check
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "[ERROR] SGLang server process ($SERVER_PID) died unexpectedly during initialization." >&2
             exit 1
         fi
         
         sleep 5
-        # Avoid ((retries++)) which evaluates to 0 and trips set -e
         retries=$((retries + 1))
         
         if [ "$retries" -ge "$max_retries" ]; then
@@ -70,9 +69,13 @@ start_server_and_wait() {
 }
 
 cleanup_server_and_cache() {
-    echo "[INFO] Cleaning up server (PID: $SERVER_PID) and cache directory..."
-    kill "$SERVER_PID" 2>/dev/null || true
-    rm -rf "${EVALHUB_CACHE_DIR:-}"
+    echo "[INFO] Cleaning up server (PID: ${SERVER_PID:-}) and cache directory..."
+    if [[ -n "${SERVER_PID:-}" ]]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${EVALHUB_CACHE_DIR:-}" ]]; then
+        rm -rf "$EVALHUB_CACHE_DIR"
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -87,8 +90,10 @@ run_eval_worker() {
     
     trap cleanup_server_and_cache EXIT
 
-    # Base model (4B): Use DP=2 to blast through N_SAMPLES=64
-    start_server_and_wait "$TARGET_MODEL" "$worker_port" "--dp 2" "256"
+    start_server_and_wait "$TARGET_MODEL" "$worker_port" \
+        "$BASE_PARALLEL_TYPE" "$BASE_PARALLEL_COUNT" \
+        "$BASE_SGL_MEM_FRACTION" "$BASE_SGL_CONSERVATIVENESS" \
+        "$BASE_SGL_CHUNKED_PREFILL" "$BASE_SGL_MAX_RUNNING_REQS"
     
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
@@ -159,8 +164,10 @@ run_judge_worker() {
 
     trap cleanup_server_and_cache EXIT
 
-    # Judge model (35B): Use TP=2 to aggregate VRAM for heavy KV Cache at high temperatures
-    start_server_and_wait "$JUDGE_MODEL" "$worker_port" "--tp 1" "160"
+    start_server_and_wait "$JUDGE_MODEL" "$worker_port" \
+        "$JUDGE_PARALLEL_TYPE" "$JUDGE_PARALLEL_COUNT" \
+        "$JUDGE_SGL_MEM_FRACTION" "$JUDGE_SGL_CONSERVATIVENESS" \
+        "$JUDGE_SGL_CHUNKED_PREFILL" "$JUDGE_SGL_MAX_RUNNING_REQS"
 
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
@@ -302,35 +309,40 @@ run_orchestrator() {
 
                 local filtered_file="data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
 
-                local all_post_jobs=()
-                for JUDGE in $JUDGE_MODELS; do
-                    for J_TEMP in $JUDGE_TEMPERATURES; do
-                        local clean_judge=$(basename "$JUDGE")
-                        local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
+                if [[ -z "${JUDGE_MODELS:-}" ]]; then
+                    echo "[INFO] JUDGE_MODELS is empty. Skipping judge and post-processing stages for $run_id."
+                    global_last_job_id="${extract_job}"
+                else
+                    local all_post_jobs=()
+                    for JUDGE in $JUDGE_MODELS; do
+                        for J_TEMP in $JUDGE_TEMPERATURES; do
+                            local clean_judge=$(basename "$JUDGE")
+                            local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
 
-                        local judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
-                            --job-name="jdg_${judge_run_id}" \
-                            --output="logs/jdg_${judge_run_id}_%j.out" \
-                            --error="logs/jdg_${judge_run_id}_%j.err" \
-                            --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
-                            --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
-                            $([[ -n "$JUDGE_SLURM_NODELIST" ]] && echo "--nodelist=$JUDGE_SLURM_NODELIST") \
-                            --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP" \
-                            "$script_path")
+                            local judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
+                                --job-name="jdg_${judge_run_id}" \
+                                --output="logs/jdg_${judge_run_id}_%j.out" \
+                                --error="logs/jdg_${judge_run_id}_%j.err" \
+                                --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
+                                --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
+                                $([[ -n "$JUDGE_SLURM_NODELIST" ]] && echo "--nodelist=$JUDGE_SLURM_NODELIST") \
+                                --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP" \
+                                "$script_path")
 
-                        local post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
-                            --job-name="post_${judge_run_id}" \
-                            --output="logs/post_${judge_run_id}_%j.out" \
-                            --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
-                            --time="${POST_SLURM_TIME}" \
-                            --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP" \
-                            "$script_path")
-                        
-                        all_post_jobs+=("$post_job")
+                            local post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                                --job-name="post_${judge_run_id}" \
+                                --output="logs/post_${judge_run_id}_%j.out" \
+                                --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
+                                --time="${POST_SLURM_TIME}" \
+                                --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP" \
+                                "$script_path")
+                            
+                            all_post_jobs+=("$post_job")
+                        done
                     done
-                done
-                
-                global_last_job_id=$(IFS=, ; echo "${all_post_jobs[*]}")
+                    
+                    global_last_job_id=$(IFS=, ; echo "${all_post_jobs[*]}")
+                fi
                 echo "[INFO] DAG Submitted. Tail Job IDs: $global_last_job_id"
             done
         done

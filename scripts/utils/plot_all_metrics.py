@@ -1,20 +1,14 @@
-#!/usr/bin/env python3
 import json
 import math
 from pathlib import Path
 import matplotlib.pyplot as plt
 
 def extract_metadata(path: Path) -> str:
-    # Örn: results/Qwen3.5-4B-Base/aime2026_64/aime2026_64_summary.json
-    task = path.parent.name       # aime2026_64
-    model = path.parent.parent.name # Qwen3.5-4B-Base
+    task = path.parent.name
+    model = path.parent.parent.name
     return f"Model: {model} | Task: {task}"
 
 def process_summary(path: Path) -> None:
-    # Judged sonuçlarını atla (sadece base sonuçları çizmek istiyoruz)
-    if "judgments" in path.parts or "judge" in str(path).lower():
-        return
-
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -29,14 +23,12 @@ def process_summary(path: Path) -> None:
     label = extract_metadata(path)
     k_vals = sorted(pass_k.keys())
     
-    # X eksenindeki sayilari k'nin log2 degerine ceviriyoruz (2^x = k)
     log2_k_vals = [int(math.log2(k)) for k in k_vals]
     
     plt.figure(figsize=(10, 6))
     plt.plot(log2_k_vals, [pass_k[k] for k in k_vals], label=label, linewidth=2,
              marker='o', linestyle='-')
     
-    # xticks olarak donusturulmus kuvvetleri veriyoruz
     plt.xticks(log2_k_vals, log2_k_vals)
     plt.title(f"Performance: {label}", fontweight="bold")
     plt.xlabel(r"$\log_2(k)$")
@@ -56,7 +48,6 @@ def main():
         print("[WARNING] 'results' klasoru bulunamadi.")
         return
         
-    # Hem "summary.json" hem de "aime2026_64_summary.json" formatlarini yakalar
     for summary_path in base_dir.rglob("*summary.json"):
         process_summary(summary_path)
 

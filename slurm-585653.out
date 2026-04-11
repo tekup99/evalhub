@@ -1,4 +1,0 @@
-[INFO] Initializing Unified Pipeline Orchestrator (Monolithic Mode)
-[INFO] Queuing Judge Worker for: Qwen3.5-4B-Base_aime2026_t0.6_max16384_J-DeepSeek-R1-0528-Qwen3-8B_t0.6
-[INFO] Queuing Post Worker for: Qwen3.5-4B-Base_aime2026_t0.6_max16384_J-DeepSeek-R1-0528-Qwen3-8B_t0.6
-[INFO] Pipeline DAG submitted successfully. Final Job ID tail: 585655
