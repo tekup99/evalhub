@@ -47,7 +47,7 @@ start_server_and_wait() {
     
     SERVER_PID=$!
     local retries=0
-    local max_retries=120 
+    local max_retries=360
     
     echo "[INFO] Waiting for server healthcheck..."
     while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
