@@ -181,3 +181,4 @@ cython_debug/
 .pypirc
 
 images/
+scripts/gemma4_pipeline.env
