@@ -49,27 +49,39 @@ start_server_and_wait() {
     local log_file="logs/vllm_server_error_${port}.log"
     touch "$log_file" # Log dosyasının kesin oluştuğundan emin olalım
     
-    # --- NEW: Dynamic Chat Template Injection ---
-    local chat_arg=""
-    if [[ "$model_path" == *"E2B"* ]]; then
-        # Create a raw text passthrough template for the base model
-        echo "{% for message in messages %}{{ message['content'] + '\n\n' }}{% endfor %}" > base_chat_template.jinja
-        chat_arg="--chat-template base_chat_template.jinja"
-        echo "[INFO] Injected raw passthrough chat template for Base Model: $model_path"
-    fi
-    # --------------------------------------------
-
     echo "[INFO] Initializing vLLM server for model: $model_path on port $port"
     echo "[INFO] Hardware Strategy: --tensor-parallel-size $p_count"
-    
-    # Notice the unquoted $chat_arg added below
-    python -m vllm.entrypoints.openai.api_server \
-        --model "$model_path" \
-        --port "$port" \
-        --tensor-parallel-size "$p_count" \
-        --trust-remote-code \
-        $chat_arg \
-        >> "$log_file" 2>&1 &
+
+    # 1. vLLM argümanlarını güvenli bir şekilde dizi (array) içinde topluyoruz
+    local vllm_args=(
+        --model "$model_path"
+        --port "$port"
+        --tensor-parallel-size "$p_count"
+        --trust-remote-code
+    )
+
+    # 2. Dosya oluşturmadan INLINE (satır içi) Chat Template Enjeksiyonu
+    # Eğer model isminde "-it", "-Instruct" veya "-Chat" geçmiyorsa (Yani model BASE ise)
+    if [[ "$model_path" != *"-it"* ]] && [[ "$model_path" != *"-Instruct"* ]] && [[ "$model_path" != *"-Chat"* ]]; then
+        
+        # Qwen Base modelleri özel ChatML (<|im_start|>) formatı gerektirir
+        if [[ "${model_path,,}" == *"qwen"* ]]; then
+            vllm_args+=( --chat-template "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}{% endfor %}{{ '<|im_start|>assistant\n' }}" )
+            echo "[INFO] Dynamic Injection: Inline ChatML applied for Qwen Base: $model_path"
+        
+        # Gemma Base, Mistral Base veya LLaMA Base modelleri için düz metin (Passthrough)
+        else
+            vllm_args+=( --chat-template "{% for message in messages %}{{ message['content'] + '\n\n' }}{% endfor %}" )
+            echo "[INFO] Dynamic Injection: Inline Passthrough applied for Base Model (Gemma/Mistral/etc): $model_path"
+        fi
+        
+    # Eğer isminde takı Varsa (Judge modelleri, Instruct veya Chat modelleri)
+    else
+        echo "[INFO] Instruction-Tuned/Judge Model Detected ($model_path). Bypassing injection, using model's native template."
+    fi
+
+    # 3. Array'i vLLM'e iletiyoruz ("${vllm_args[@]}" tırnakları şablon boşluklarını korur)
+    python -m vllm.entrypoints.openai.api_server "${vllm_args[@]}" >> "$log_file" 2>&1 &
     
     SERVER_PID=$!
     local retries=0
