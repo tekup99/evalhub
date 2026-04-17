@@ -4,23 +4,38 @@
 # ==============================================================================
 set -euo pipefail
 
+# 1. Path Independence: Establish project root dynamically
+if [[ -z "${PROJECT_ROOT:-}" ]]; then
+    export PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+cd "$PROJECT_ROOT"
+
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-# Conda'yı Slurm job'ları içinde güvenle başlatmak için alternatif yöntem
-# Eğer bu satır hata verirse kendi sisteminize göre conda yolunu belirtebilirsiniz.
-eval "$(conda shell.bash hook 2>/dev/null || echo '')"
-conda activate evalhub_env || echo "[WARNING] Conda ortamı aktif edilemedi, sistem Python'u kullanılacak."
+# Triton Fallback: Disable custom triton kernels if SparseMatrix issues persist on H200
+export VLLM_USE_TRITON_FLASH_ATTN=0 
 
-CONFIG_FILE="scripts/gemma4_pipeline.env"
+# Conda activation
+eval "$(conda shell.bash hook 2>/dev/null || echo '')"
+conda activate evalhub_env || echo "[WARNING] Conda environment failed to activate, falling back to system Python."
+
+CONFIG_FILE="${PROJECT_ROOT}/scripts/gemma4_pipeline.env"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "[ERROR] Configuration file $CONFIG_FILE not found." >&2
+    echo "[ERROR] Configuration file $CONFIG_FILE not found at $PROJECT_ROOT/scripts." >&2
     exit 1
 fi
 
+# 2. Environment Variable Integration: Force export of all variables in the .env
+set -a
 source "$CONFIG_FILE"
+set +a
+
+# Ensure HF_TOKEN is exposed to vLLM
+export HF_TOKEN="${HF_TOKEN:-}"
 
 RUN_MODE="${RUN_MODE:-orchestrator}"
+BASE_PORT="${PORT:-30000}"
 
 # ------------------------------------------------------------------------------
 # Utilities
@@ -34,14 +49,26 @@ start_server_and_wait() {
     local log_file="logs/vllm_server_error_${port}.log"
     touch "$log_file" # Log dosyasının kesin oluştuğundan emin olalım
     
+    # --- NEW: Dynamic Chat Template Injection ---
+    local chat_arg=""
+    if [[ "$model_path" == *"E2B"* ]]; then
+        # Create a raw text passthrough template for the base model
+        echo "{% for message in messages %}{{ message['content'] + '\n\n' }}{% endfor %}" > base_chat_template.jinja
+        chat_arg="--chat-template base_chat_template.jinja"
+        echo "[INFO] Injected raw passthrough chat template for Base Model: $model_path"
+    fi
+    # --------------------------------------------
+
     echo "[INFO] Initializing vLLM server for model: $model_path on port $port"
     echo "[INFO] Hardware Strategy: --tensor-parallel-size $p_count"
     
+    # Notice the unquoted $chat_arg added below
     python -m vllm.entrypoints.openai.api_server \
         --model "$model_path" \
         --port "$port" \
         --tensor-parallel-size "$p_count" \
         --trust-remote-code \
+        $chat_arg \
         >> "$log_file" 2>&1 &
     
     SERVER_PID=$!
@@ -52,9 +79,7 @@ start_server_and_wait() {
     while ! curl -s "http://127.0.0.1:$port/health" > /dev/null; do
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "[ERROR] vLLM server process ($SERVER_PID) died unexpectedly." >&2
-            echo "[ERROR] ================== START VLLM LOGS ==================" >&2
             cat "$log_file" >&2
-            echo "[ERROR] =================== END VLLM LOGS ===================" >&2
             exit 1
         fi
         
@@ -63,9 +88,7 @@ start_server_and_wait() {
         
         if [ "$retries" -ge "$max_retries" ]; then
             echo "[ERROR] Server failed health check timeout on port $port." >&2
-            echo "[ERROR] ================== TAIL VLLM LOGS ==================" >&2
             tail -n 100 "$log_file" >&2
-            echo "[ERROR] =================== END VLLM LOGS ===================" >&2
             kill "$SERVER_PID" 2>/dev/null || true
             exit 1
         fi
@@ -89,9 +112,10 @@ cleanup_server_and_cache() {
 run_eval_worker() {
     echo "[INFO] --- Starting Base Evaluation ---"
     
-    local worker_port=$((30000 + RANDOM % 10000))
-    export EVALHUB_CACHE_DIR="data/cache/eval_${RANDOM}"
-    mkdir -p "$EVALHUB_CACHE_DIR" logs
+    # 3. Reconciled Port Logic: Based on configuration PORT
+    local worker_port=$((BASE_PORT + RANDOM % 10000))
+    export EVALHUB_CACHE_DIR="${PROJECT_ROOT}/data/cache/eval_${RANDOM}"
+    mkdir -p "$EVALHUB_CACHE_DIR" "${PROJECT_ROOT}/logs"
     
     trap cleanup_server_and_cache EXIT
 
@@ -101,7 +125,7 @@ run_eval_worker() {
     export HOSTED_VLLM_API_KEY="EMPTY"
 
     local clean_model=$(basename "$TARGET_MODEL")
-    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
+    local out_dir="${PROJECT_ROOT}/results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
     local cmd_args=(
@@ -132,15 +156,15 @@ run_eval_worker() {
 run_extract_worker() {
     echo "[INFO] --- Running Pass@K Extraction ---"
     local clean_model=$(basename "$TARGET_MODEL")
-    local filtered_dir="data/passatk_filtered/${clean_model}"
-    mkdir -p "$filtered_dir" logs
+    local filtered_dir="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}"
+    mkdir -p "$filtered_dir" "${PROJECT_ROOT}/logs"
     
-    local out_dir="results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"    
+    local out_dir="${PROJECT_ROOT}/results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"    
     local results_file="${out_dir}/${BENCHMARK}_results.jsonl"
     local raw_file="${out_dir}/${BENCHMARK}_raw.jsonl"
     local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"    
     
-    python scripts/cot_judge_pipeline/01_extract_corrects.py \
+    python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/01_extract_corrects.py" \
         --results_file "$results_file" \
         --raw_file "$raw_file" \
         --output_file "$output_filtered"
@@ -149,9 +173,9 @@ run_extract_worker() {
 run_judge_worker() {
     echo "[INFO] --- Starting CoT Judging ---"
     
-    local worker_port=$((40000 + RANDOM % 10000))
-    export EVALHUB_CACHE_DIR="data/cache/judge_${RANDOM}"
-    mkdir -p "$EVALHUB_CACHE_DIR" logs
+    local worker_port=$((BASE_PORT + 10000 + RANDOM % 10000))
+    export EVALHUB_CACHE_DIR="${PROJECT_ROOT}/data/cache/judge_${RANDOM}"
+    mkdir -p "$EVALHUB_CACHE_DIR" "${PROJECT_ROOT}/logs"
 
     trap cleanup_server_and_cache EXIT
 
@@ -162,11 +186,11 @@ run_judge_worker() {
 
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
-        FILTERED_FILE="data/passatk_filtered/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
+        FILTERED_FILE="${PROJECT_ROOT}/data/passatk_filtered/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
     fi
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
@@ -200,22 +224,22 @@ run_post_worker() {
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
     
-    local out_dir="results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
+    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
     rm -f "${out_dir}/math_judge_summary.json"
 
     local eval_judge_output="${out_dir}/math_judge.jsonl"
     [[ ! -f "$eval_judge_output" ]] && eval_judge_output="${out_dir}/math_judge_raw.jsonl"
 
     local majority_file="${out_dir}/math_judge_majority.jsonl"
-    local base_results_path="results/${clean_target}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
+    local base_results_path="${PROJECT_ROOT}/results/${clean_target}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     local base_results_file="${base_results_path}/${BENCHMARK}_results.jsonl"
 
     local judged_results_file="${out_dir}/${BENCHMARK}_results.jsonl"
     local summary_file="${out_dir}/${BENCHMARK}_summary.json"
     local stats_file="${out_dir}/${BENCHMARK}_generation_stats.json"
 
-    python scripts/cot_judge_pipeline/04_aggregate_votes.py --input_file "$eval_judge_output" --output_file "$majority_file"
-    python scripts/cot_judge_pipeline/05_apply_metrics.py --base_results_file "$base_results_file" --judge_majority_file "$majority_file" --output_file "$judged_results_file" --summary_file "$summary_file" --stats_file "$stats_file"
+    python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/04_aggregate_votes.py" --input_file "$eval_judge_output" --output_file "$majority_file"
+    python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/05_apply_metrics.py" --base_results_file "$base_results_file" --judge_majority_file "$majority_file" --output_file "$judged_results_file" --summary_file "$summary_file" --stats_file "$stats_file"
 }
 
 # ------------------------------------------------------------------------------
@@ -224,7 +248,7 @@ run_post_worker() {
 run_orchestrator() {
     echo "[INFO] Initializing Unified Pipeline Orchestrator (Monolithic Mode)"
 
-    mkdir -p logs results/judgments data/passatk_filtered plots data/cache
+    mkdir -p "${PROJECT_ROOT}/logs" "${PROJECT_ROOT}/results/judgments" "${PROJECT_ROOT}/data/passatk_filtered" "${PROJECT_ROOT}/plots" "${PROJECT_ROOT}/data/cache"
 
     local script_path=$(realpath "$0")
     local global_last_job_id=""
@@ -240,18 +264,18 @@ run_orchestrator() {
                 local global_dep=""
                 [[ -n "$global_last_job_id" ]] && global_dep="--dependency=afterany:${global_last_job_id}"
 
-                # Nodelist parametresi .env dosyasında boş bırakılmışsa Slurm'e iletmeyelim
                 local nodelist_param=""
                 [[ -n "${BASE_SLURM_NODELIST:-}" ]] && nodelist_param="--nodelist=$BASE_SLURM_NODELIST"
 
+                # 4. Strict Slurm Exports: Ensure HF_TOKEN and paths are explicitly passed to worker nodes
                 local base_job=$(sbatch --parsable $global_dep \
                     --job-name="eval_${run_id}" \
-                    --output="logs/eval_${run_id}_%j.out" \
-                    --error="logs/eval_${run_id}_%j.err" \
+                    --output="${PROJECT_ROOT}/logs/eval_${run_id}_%j.out" \
+                    --error="${PROJECT_ROOT}/logs/eval_${run_id}_%j.err" \
                     --ntasks=1 --cpus-per-task="${BASE_SLURM_CPUS}" --mem="${BASE_SLURM_MEM}" \
                     --gres="${BASE_SLURM_GRES}" --time="${BASE_SLURM_TIME}" \
                     $nodelist_param \
-                    --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
+                    --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
                     "$script_path" || echo "FAILED")
 
                 if [[ "$base_job" == "FAILED" ]]; then
@@ -260,14 +284,11 @@ run_orchestrator() {
                 fi
 
                 echo "[SUCCESS] Base Eval Job Submitted: $base_job"
-                # For brevity in testing, I'm just submitting the base job here to see if logs work.
-                # The extract, judge and post jobs are omitted from this dry-run trace so you can pinpoint the crash.
                 
-                # Sadece pipeline bozulmasın diye sırayla ekliyorum:
                 local extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
-                    --job-name="extr_${run_id}" --output="logs/extr_${run_id}_%j.out" \
+                    --job-name="extr_${run_id}" --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
                     --ntasks=1 --time="${EXTRACT_SLURM_TIME}" \
-                    --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS" \
+                    --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",PROJECT_ROOT="${PROJECT_ROOT}" \
                     "$script_path" || echo "FAILED")
 
                 global_last_job_id="${extract_job}"
