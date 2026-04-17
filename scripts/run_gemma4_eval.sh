@@ -60,25 +60,73 @@ start_server_and_wait() {
         --trust-remote-code
     )
 
-    # 2. Dosya oluşturmadan INLINE (satır içi) Chat Template Enjeksiyonu
-    # Eğer model isminde "-it", "-Instruct" veya "-Chat" geçmiyorsa (Yani model BASE ise)
-    if [[ "$model_path" != *"-it"* ]] && [[ "$model_path" != *"-Instruct"* ]] && [[ "$model_path" != *"-Chat"* ]]; then
+    # --- GEMMA MODİFİKASYONU: Jinja içine enable_thinking=true enjekte etme ---
+    local is_gemma=false
+    if [[ "${model_path,,}" == *"gemma"* ]]; then
+        is_gemma=true
+    fi
+
+    if [[ "$is_gemma" == true ]]; then
+        echo "[INFO] Gemma model detected ($model_path). Generating dynamic template with enable_thinking=true..."
+        local template_file="${PROJECT_ROOT}/logs/gemma_thinking_${port}.jinja"
+        local py_script="${PROJECT_ROOT}/logs/gen_template_${port}.py"
         
-        # Qwen Base modelleri özel ChatML (<|im_start|>) formatı gerektirir
+        # Python scripti ile modelin orjinal template'ini çekip modifiye ediyoruz
+        cat << 'EOF' > "$py_script"
+import sys
+from transformers import AutoTokenizer
+
+model_path = sys.argv[1]
+out_file = sys.argv[2]
+
+try:
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    template = tokenizer.chat_template
+    
+    if not template:
+        template = getattr(tokenizer, "default_chat_template", None)
+        
+    if not template:
+        # Eğer tokenizer'da hiçbir template yoksa düz passthrough
+        template = "{% for message in messages %}{{ message['content'] + '\\n\\n' }}{% endfor %}"
+
+    
+    template = template.replace("kwargs.get('enable_thinking', False)", "True")
+    template = template.replace('kwargs.get("enable_thinking", False)', "True")
+    template = template.replace("kwargs.get('enable_thinking',False)", "True")    
+    # vLLM'de kwargs veremediğimiz için doğrudan Jinja değişkeni olarak ayarlıyoruz
+    final_template = "{% set enable_thinking = true %}\n" + template
+    
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write(final_template)
+except Exception as e:
+    print(f"WARN: Template generation failed: {e}")
+EOF
+        
+        # Scripti çalıştır ve şablon dosyasını vLLM'e ver
+        python3 "$py_script" "$model_path" "$template_file"
+        
+        if [[ -f "$template_file" ]]; then
+            vllm_args+=( --chat-template "$template_file" )
+            echo "[INFO] Dynamic thinking template applied for Gemma."
+        fi
+
+    # 2. Eğer model Gemma DEĞİLSE ve BASE modelse
+    elif [[ "$model_path" != *"-it"* ]] && [[ "$model_path" != *"-Instruct"* ]] && [[ "$model_path" != *"-Chat"* ]]; then
+        
         if [[ "${model_path,,}" == *"qwen"* ]]; then
             vllm_args+=( --chat-template "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}{% endfor %}{{ '<|im_start|>assistant\n' }}" )
             echo "[INFO] Dynamic Injection: Inline ChatML applied for Qwen Base: $model_path"
-        
-        # Gemma Base, Mistral Base veya LLaMA Base modelleri için düz metin (Passthrough)
         else
             vllm_args+=( --chat-template "{% for message in messages %}{{ message['content'] + '\n\n' }}{% endfor %}" )
-            echo "[INFO] Dynamic Injection: Inline Passthrough applied for Base Model (Gemma/Mistral/etc): $model_path"
+            echo "[INFO] Dynamic Injection: Inline Passthrough applied for Base Model: $model_path"
         fi
         
-    # Eğer isminde takı Varsa (Judge modelleri, Instruct veya Chat modelleri)
+    # Eğer model Gemma DEĞİLSE ve Instruct/Chat/Judge modelse
     else
-        echo "[INFO] Instruction-Tuned/Judge Model Detected ($model_path). Bypassing injection, using model's native template."
+        echo "[INFO] Non-Gemma Instruction-Tuned/Judge Model Detected ($model_path). Using native template."
     fi
+    # -----------------------------------------------------------------
 
     # 3. Array'i vLLM'e iletiyoruz ("${vllm_args[@]}" tırnakları şablon boşluklarını korur)
     python -m vllm.entrypoints.openai.api_server "${vllm_args[@]}" >> "$log_file" 2>&1 &
