@@ -308,6 +308,7 @@ run_post_worker() {
 run_orchestrator() {
     echo "[INFO] Initializing Unified Pipeline Orchestrator (Monolithic Mode)"
 
+    # Gerekli dizinlerin oluşturulması
     mkdir -p "${PROJECT_ROOT}/logs" "${PROJECT_ROOT}/results/judgments" "${PROJECT_ROOT}/data/passatk_filtered" "${PROJECT_ROOT}/plots" "${PROJECT_ROOT}/data/cache"
 
     local script_path=$(realpath "$0")
@@ -319,15 +320,16 @@ run_orchestrator() {
             for B_TEMP in $BASE_TEMPERATURES; do
                 
                 local run_id="${clean_model}_${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}"
-                echo "[INFO] Submitting Base Job for Combination: $run_id"
+                echo "[INFO] Submitting DAG for Combination: $run_id"
 
+                # Önceki model/benchmark setinin bitmesini beklemek için bağımlılık
                 local global_dep=""
                 [[ -n "$global_last_job_id" ]] && global_dep="--dependency=afterany:${global_last_job_id}"
 
                 local nodelist_param=""
                 [[ -n "${BASE_SLURM_NODELIST:-}" ]] && nodelist_param="--nodelist=$BASE_SLURM_NODELIST"
 
-                # 4. Strict Slurm Exports: Ensure HF_TOKEN and paths are explicitly passed to worker nodes
+                # 1. Aşama: Base Evaluation (vLLM Server + Generation)
                 local base_job=$(sbatch --parsable $global_dep \
                     --job-name="eval_${run_id}" \
                     --output="${PROJECT_ROOT}/logs/eval_${run_id}_%j.out" \
@@ -336,27 +338,66 @@ run_orchestrator() {
                     --gres="${BASE_SLURM_GRES}" --time="${BASE_SLURM_TIME}" \
                     $nodelist_param \
                     --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
-                    "$script_path" || echo "FAILED")
+                    "$script_path")
 
-                if [[ "$base_job" == "FAILED" ]]; then
-                    echo "[ERROR] Slurm sbatch failed to submit base_job. Check your slurm configuration."
-                    exit 1
-                fi
-
-                echo "[SUCCESS] Base Eval Job Submitted: $base_job"
-                
+                # 2. Aşama: Pass@K Extraction (Doğru cevapların süzülmesi)
                 local extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
-                    --job-name="extr_${run_id}" --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
-                    --ntasks=1 --time="${EXTRACT_SLURM_TIME}" \
+                    --job-name="extr_${run_id}" \
+                    --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
+                    --ntasks=1 --cpus-per-task="${EXTRACT_SLURM_CPUS}" --mem="${EXTRACT_SLURM_MEM}" \
+                    --time="${EXTRACT_SLURM_TIME}" \
                     --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",PROJECT_ROOT="${PROJECT_ROOT}" \
-                    "$script_path" || echo "FAILED")
+                    "$script_path")
 
-                global_last_job_id="${extract_job}"
+                local filtered_file="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
+
+                # Judge ve Post aşamalarının kontrolü
+                if [[ -z "${JUDGE_MODELS:-}" ]]; then
+                    echo "[INFO] JUDGE_MODELS is empty. Skipping judge and post-processing stages for $run_id."
+                    global_last_job_id="${extract_job}"
+                else
+                    local all_post_jobs=()
+                    for JUDGE in $JUDGE_MODELS; do
+                        # Çevresel değişkene göre tekli veya çoklu sıcaklık döngüsü
+                        for J_TEMP in ${JUDGE_TEMPERATURES:-$JUDGE_TEMP}; do
+                            local clean_judge=$(basename "$JUDGE")
+                            local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
+
+                            local judge_nodelist=""
+                            [[ -n "${JUDGE_SLURM_NODELIST:-}" ]] && judge_nodelist="--nodelist=$JUDGE_SLURM_NODELIST"
+
+                            # 3. Aşama: CoT Judging (Judge modelinin çalıştırılması)
+                            local judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
+                                --job-name="jdg_${judge_run_id}" \
+                                --output="${PROJECT_ROOT}/logs/jdg_${judge_run_id}_%j.out" \
+                                --error="${PROJECT_ROOT}/logs/jdg_${judge_run_id}_%j.err" \
+                                --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
+                                --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
+                                $judge_nodelist \
+                                --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
+                                "$script_path")
+
+                            # 4. Aşama: Post-processing (Sonuçların birleştirilmesi ve metrikler)
+                            local post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                                --job-name="post_${judge_run_id}" \
+                                --output="${PROJECT_ROOT}/logs/post_${judge_run_id}_%j.out" \
+                                --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
+                                --time="${POST_SLURM_TIME}" \
+                                --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP",PROJECT_ROOT="${PROJECT_ROOT}" \
+                                "$script_path")
+                            
+                            all_post_jobs+=("$post_job")
+                        done
+                    done
+                    
+                    # Tüm post işlerinin bitmesini beklemek için ID listesini güncelle
+                    global_last_job_id=$(IFS=, ; echo "${all_post_jobs[*]}")
+                fi
+                echo "[INFO] DAG Submitted. Tail Job IDs: $global_last_job_id"
             done
         done
     done
 }
-
 case "$RUN_MODE" in
     orchestrator)   run_orchestrator ;;
     eval_worker)    run_eval_worker ;;
