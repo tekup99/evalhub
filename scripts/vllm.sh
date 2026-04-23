@@ -19,7 +19,7 @@ export VLLM_USE_TRITON_FLASH_ATTN=0
 eval "$(conda shell.bash hook 2>/dev/null || echo '')"
 conda activate evalhub_env || echo "[WARNING] Conda environment failed to activate, falling back to system Python."
 
-CONFIG_FILE="${PROJECT_ROOT}/scripts/gemma4_pipeline.env"
+CONFIG_FILE="${PROJECT_ROOT}/scripts/vllm.env"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "[ERROR] Configuration file $CONFIG_FILE not found at $PROJECT_ROOT/scripts." >&2
@@ -47,12 +47,12 @@ start_server_and_wait() {
     
     mkdir -p logs
     local log_file="logs/vllm_server_error_${port}.log"
-    touch "$log_file" # Log dosyasının kesin oluştuğundan emin olalım
+    touch "$log_file" # Ensure the log file is created
     
     echo "[INFO] Initializing vLLM server for model: $model_path on port $port"
     echo "[INFO] Hardware Strategy: --tensor-parallel-size $p_count"
 
-    # 1. vLLM argümanlarını güvenli bir şekilde dizi (array) içinde topluyoruz
+    # 1. Store basic vLLM arguments
     local vllm_args=(
         --model "$model_path"
         --port "$port"
@@ -60,20 +60,14 @@ start_server_and_wait() {
         --trust-remote-code
     )
 
-    # --- GEMMA MODİFİKASYONU: Jinja içine enable_thinking=true enjekte etme ---
-    local is_gemma=false
-    if [[ "${model_path,,}" == *"gemma"* ]]; then
-        is_gemma=true
-    fi
+    # 2. Smart Template Manager (Resolves v4.44+ requirements & Thinking injections)
+    local template_file="/tmp/template_${port}.jinja"
+    local py_script="/tmp/gen_template_${port}.py"
 
-    if [[ "$is_gemma" == true ]]; then
-        echo "[INFO] Gemma model detected ($model_path). Generating dynamic template with enable_thinking=true..."
-        local template_file="${PROJECT_ROOT}/logs/gemma_thinking_${port}.jinja"
-        local py_script="${PROJECT_ROOT}/logs/gen_template_${port}.py"
-        
-        # Python scripti ile modelin orjinal template'ini çekip modifiye ediyoruz
-        cat << 'EOF' > "$py_script"
+    echo "[INFO] Running Smart Template Manager to resolve chat templates..."
+    cat << 'EOF' > "$py_script"
 import sys
+import re
 from transformers import AutoTokenizer
 
 model_path = sys.argv[1]
@@ -81,54 +75,44 @@ out_file = sys.argv[2]
 
 try:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    template = tokenizer.chat_template
+    template = getattr(tokenizer, "chat_template", None)
     
     if not template:
         template = getattr(tokenizer, "default_chat_template", None)
         
+    # Fallback Mechanism: Transformers v4.44 requires a template if tokenizer doesn't define one
     if not template:
-        # Eğer tokenizer'da hiçbir template yoksa düz passthrough
         template = "{% for message in messages %}{{ message['content'] + '\\n\\n' }}{% endfor %}"
 
-    
-    template = template.replace("kwargs.get('enable_thinking', False)", "True")
-    template = template.replace('kwargs.get("enable_thinking", False)', "True")
-    template = template.replace("kwargs.get('enable_thinking',False)", "True")    
-    # vLLM'de kwargs veremediğimiz için doğrudan Jinja değişkeni olarak ayarlıyoruz
-    final_template = "{% set enable_thinking = true %}\n" + template
-    
+    # Thinking Mode Injection & Sanitization
+    if 'enable_thinking' in template:
+        # Prepend kwargs initialization and force enable_thinking=true
+        prefix = "{% set kwargs = kwargs | default({}) %}\n{% set enable_thinking = true %}\n"
+        template = prefix + template
+        
+        # Aggressively sanitize any attempt to pull enable_thinking from undefined kwargs
+        template = re.sub(r"kwargs\.get\(\s*['\"]enable_thinking['\"]\s*,\s*(True|False|true|false)\s*\)", "True", template)
+        template = re.sub(r"kwargs\s*\[\s*['\"]enable_thinking['\"]\s*\]", "True", template)
+
     with open(out_file, "w", encoding="utf-8") as f:
-        f.write(final_template)
+        f.write(template)
+
 except Exception as e:
-    print(f"WARN: Template generation failed: {e}")
+    print(f"WARN: Template generation failed: {e}", file=sys.stderr)
+    sys.exit(1)
 EOF
-        
-        # Scripti çalıştır ve şablon dosyasını vLLM'e ver
-        python3 "$py_script" "$model_path" "$template_file"
-        
+
+    # Execute the template generator and inject if successful
+    if python3 "$py_script" "$model_path" "$template_file"; then
         if [[ -f "$template_file" ]]; then
             vllm_args+=( --chat-template "$template_file" )
-            echo "[INFO] Dynamic thinking template applied for Gemma."
+            echo "[INFO] Validated/Injected template successfully loaded from $template_file."
         fi
-
-    # 2. Eğer model Gemma DEĞİLSE ve BASE modelse
-    elif [[ "$model_path" != *"-it"* ]] && [[ "$model_path" != *"-Instruct"* ]] && [[ "$model_path" != *"-Chat"* ]]; then
-        
-        if [[ "${model_path,,}" == *"qwen"* ]]; then
-            vllm_args+=( --chat-template "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}{% endfor %}{{ '<|im_start|>assistant\n' }}" )
-            echo "[INFO] Dynamic Injection: Inline ChatML applied for Qwen Base: $model_path"
-        else
-            vllm_args+=( --chat-template "{% for message in messages %}{{ message['content'] + '\n\n' }}{% endfor %}" )
-            echo "[INFO] Dynamic Injection: Inline Passthrough applied for Base Model: $model_path"
-        fi
-        
-    # Eğer model Gemma DEĞİLSE ve Instruct/Chat/Judge modelse
     else
-        echo "[INFO] Non-Gemma Instruction-Tuned/Judge Model Detected ($model_path). Using native template."
+        echo "[WARN] Python template extraction failed. Allowing vLLM to attempt native loading."
     fi
-    # -----------------------------------------------------------------
 
-    # 3. Array'i vLLM'e iletiyoruz ("${vllm_args[@]}" tırnakları şablon boşluklarını korur)
+    # 3. Pass arguments safely to vLLM
     python -m vllm.entrypoints.openai.api_server "${vllm_args[@]}" >> "$log_file" 2>&1 &
     
     SERVER_PID=$!
@@ -224,15 +208,47 @@ run_extract_worker() {
     local raw_file="${out_dir}/${BENCHMARK}_raw.jsonl"
     local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"    
     
+    # === DEPENDENCY FALLBACK CHECK ===
+    # Eğer base_job fail olduysa dosyalar oluşmamıştır. Zincir kopsun istemiyorsak temiz çıkıyoruz.
+    if [[ ! -f "$results_file" && ! -f "$raw_file" ]]; then
+        echo "[ERROR] Base evaluation dosyaları bulunamadı. Önceki adım (base_job) patlamış olabilir."
+        echo "[INFO] Dependency zincirini kırmamak için boş dosya oluşturulup graceful exit yapılıyor."
+        touch "$output_filtered"
+        exit 0
+    fi
+
     python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/01_extract_corrects.py" \
         --results_file "$results_file" \
         --raw_file "$raw_file" \
-        --output_file "$output_filtered"
+        --output_file "$output_filtered" || {
+        echo "[WARN] Extraction betiği 0 correct (pass@k=0) nedeniyle hata döndürmüş olabilir. Dependency kırılmaması için devam ediliyor."
+    }
+    
+    # Python patlasa da boş bir JSONL dosyası oluşturalım ki judge fail olmak yerine graceful exit yapabilsin
+    touch "$output_filtered"
 }
 
 run_judge_worker() {
     echo "[INFO] --- Starting CoT Judging ---"
     
+    local clean_target=$(basename "$TARGET_MODEL")
+    local clean_judge=$(basename "$JUDGE_MODEL")
+    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    mkdir -p "$out_dir"
+
+    if [[ -z "${FILTERED_FILE:-}" ]]; then
+        FILTERED_FILE="${PROJECT_ROOT}/data/passatk_filtered/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
+    fi
+
+    # === PASS@K 0 CHECK ===
+    # Filtrelenmiş dosya boyutu 0 ise (hiç doğru çıkmamışsa), judge kısmını boşuna VRAM harcamadan atla.
+    if [[ ! -s "$FILTERED_FILE" ]]; then
+        echo "[INFO] Filtrelenmiş dosya boş veya eksik (pass@k=0). Judge worker atlanıyor ve temiz çıkış yapılıyor."
+        # Post worker'ın patlamaması için dummy bir çıktı bırak
+        touch "$out_dir/math_judge.jsonl"
+        exit 0
+    fi
+
     local worker_port=$((BASE_PORT + 10000 + RANDOM % 10000))
     export EVALHUB_CACHE_DIR="${PROJECT_ROOT}/data/cache/judge_${RANDOM}"
     mkdir -p "$EVALHUB_CACHE_DIR" "${PROJECT_ROOT}/logs"
@@ -243,15 +259,6 @@ run_judge_worker() {
 
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
-
-    local clean_target=$(basename "$TARGET_MODEL")
-    local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
-    mkdir -p "$out_dir"
-
-    if [[ -z "${FILTERED_FILE:-}" ]]; then
-        FILTERED_FILE="${PROJECT_ROOT}/data/passatk_filtered/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
-    fi
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
     
@@ -298,6 +305,16 @@ run_post_worker() {
     local summary_file="${out_dir}/${BENCHMARK}_summary.json"
     local stats_file="${out_dir}/${BENCHMARK}_generation_stats.json"
 
+    # === PASS@K 0 CHECK ===
+    # Judge dosyası boşsa script'leri çalıştırmadan dummy metric'ler ile bitir
+    if [[ ! -s "$eval_judge_output" ]]; then
+        echo "[INFO] Judge output boş (muhtemelen pass@k=0). Post-processing atlanıyor."
+        touch "$majority_file" "$judged_results_file"
+        echo '{"pass_at_k": 0.0, "note": "Skipped due to 0 base corrects"}' > "$summary_file"
+        echo '{"note": "Skipped due to 0 base corrects"}' > "$stats_file"
+        exit 0
+    fi
+
     python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/04_aggregate_votes.py" --input_file "$eval_judge_output" --output_file "$majority_file"
     python "${PROJECT_ROOT}/scripts/cot_judge_pipeline/05_apply_metrics.py" --base_results_file "$base_results_file" --judge_majority_file "$majority_file" --output_file "$judged_results_file" --summary_file "$summary_file" --stats_file "$stats_file"
 }
@@ -322,7 +339,7 @@ run_orchestrator() {
                 local run_id="${clean_model}_${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}"
                 echo "[INFO] Submitting DAG for Combination: $run_id"
 
-                # Önceki model/benchmark setinin bitmesini beklemek için bağımlılık
+                # Önceki model/benchmark setinin bitmesini beklemek için bağımlılık (afterany kullanıyoruz)
                 local global_dep=""
                 [[ -n "$global_last_job_id" ]] && global_dep="--dependency=afterany:${global_last_job_id}"
 
@@ -340,8 +357,8 @@ run_orchestrator() {
                     --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
                     "$script_path")
 
-                # 2. Aşama: Pass@K Extraction (Doğru cevapların süzülmesi)
-                local extract_job=$(sbatch --parsable --dependency=afterok:"${base_job}" \
+                # 2. Aşama: Pass@K Extraction (Doğru cevapların süzülmesi - afterany)
+                local extract_job=$(sbatch --parsable --dependency=afterany:"${base_job}" \
                     --job-name="extr_${run_id}" \
                     --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
                     --ntasks=1 --cpus-per-task="${EXTRACT_SLURM_CPUS}" --mem="${EXTRACT_SLURM_MEM}" \
@@ -351,14 +368,16 @@ run_orchestrator() {
 
                 local filtered_file="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
 
+                # Judge döngüsü için başlangıç dependency'si extract_job'dır.
+                local last_judge_dep="${extract_job}"
+
                 # Judge ve Post aşamalarının kontrolü
                 if [[ -z "${JUDGE_MODELS:-}" ]]; then
                     echo "[INFO] JUDGE_MODELS is empty. Skipping judge and post-processing stages for $run_id."
                     global_last_job_id="${extract_job}"
                 else
-                    local all_post_jobs=()
+                    # Judge modelleri içinde de chain oluşturuyoruz (birbiri ardına çalışacaklar)
                     for JUDGE in $JUDGE_MODELS; do
-                        # Çevresel değişkene göre tekli veya çoklu sıcaklık döngüsü
                         for J_TEMP in ${JUDGE_TEMPERATURES:-$JUDGE_TEMP}; do
                             local clean_judge=$(basename "$JUDGE")
                             local judge_run_id="${run_id}_J-${clean_judge}_t${J_TEMP}"
@@ -366,8 +385,8 @@ run_orchestrator() {
                             local judge_nodelist=""
                             [[ -n "${JUDGE_SLURM_NODELIST:-}" ]] && judge_nodelist="--nodelist=$JUDGE_SLURM_NODELIST"
 
-                            # 3. Aşama: CoT Judging (Judge modelinin çalıştırılması)
-                            local judge_job=$(sbatch --parsable --dependency=afterok:"${extract_job}" \
+                            # 3. Aşama: CoT Judging (Bir önceki adımın bitmesini bekler - afterany)
+                            local judge_job=$(sbatch --parsable --dependency=afterany:"${last_judge_dep}" \
                                 --job-name="jdg_${judge_run_id}" \
                                 --output="${PROJECT_ROOT}/logs/jdg_${judge_run_id}_%j.out" \
                                 --error="${PROJECT_ROOT}/logs/jdg_${judge_run_id}_%j.err" \
@@ -377,8 +396,8 @@ run_orchestrator() {
                                 --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
                                 "$script_path")
 
-                            # 4. Aşama: Post-processing (Sonuçların birleştirilmesi ve metrikler)
-                            local post_job=$(sbatch --parsable --dependency=afterok:"${judge_job}" \
+                            # 4. Aşama: Post-processing (Kendi judge job'ını bekler - afterany)
+                            local post_job=$(sbatch --parsable --dependency=afterany:"${judge_job}" \
                                 --job-name="post_${judge_run_id}" \
                                 --output="${PROJECT_ROOT}/logs/post_${judge_run_id}_%j.out" \
                                 --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
@@ -386,14 +405,15 @@ run_orchestrator() {
                                 --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP",PROJECT_ROOT="${PROJECT_ROOT}" \
                                 "$script_path")
                             
-                            all_post_jobs+=("$post_job")
+                            # Sonraki judge iterasyonu, bu judge'ın post-processing'inin bitmesini beklesin
+                            last_judge_dep="${post_job}"
                         done
                     done
                     
-                    # Tüm post işlerinin bitmesini beklemek için ID listesini güncelle
-                    global_last_job_id=$(IFS=, ; echo "${all_post_jobs[*]}")
+                    # Sonraki Base Model iterasyonu en son submit edilen post_job'ı bekleyecek
+                    global_last_job_id="${last_judge_dep}"
                 fi
-                echo "[INFO] DAG Submitted. Tail Job IDs: $global_last_job_id"
+                echo "[INFO] DAG Submitted. Tail Job ID: $global_last_job_id"
             done
         done
     done

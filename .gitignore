@@ -24,9 +24,15 @@ wheels/
 share/python-wheels/
 results/
 results2/
+results3/
+results4/
 data2/
+data3/
+data4/
 logs/
 data/
+scripts/sglang.env/
+scripts/vllm.env/
 comparison_plots/
 *.egg-info/
 .installed.cfg
@@ -182,3 +188,4 @@ cython_debug/
 
 images/
 scripts/gemma4_pipeline.env
+*.env

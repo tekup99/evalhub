@@ -10,7 +10,7 @@ export SGLANG_DISABLE_CUDNN_CHECK=1
 eval "$(conda shell.bash hook)"
 conda activate evalhub_env
 
-CONFIG_FILE="scripts/unified_pipeline.env"
+CONFIG_FILE="scripts/sglang.env"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "[ERROR] Configuration file $CONFIG_FILE not found." >&2
