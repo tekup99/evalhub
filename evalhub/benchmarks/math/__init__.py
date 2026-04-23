@@ -11,7 +11,7 @@ from .zebralogic import ZebraLogicDataset
 __all__ = [
     "AIME2024Dataset",
     "AIME2025Dataset",
-    "AIME2026Dataset",,
+    "AIME2026Dataset",
     "AIME2026TRDataset",
     "GSM8KDataset",
     "HendrycksMathDataset",

@@ -6,7 +6,7 @@ from evalhub.benchmarks.base import GroundTruth, Task
 from evalhub.benchmarks.math.base import MathDataset
 from evalhub.benchmarks.registry import register_dataset
 
-AIME2026_TR = "aime2026-tr"
+AIME2026_TR = "aime2026_tr"
 
 @register_dataset((AIME2026_TR, None, True))
 class AIME2026TRDataset(MathDataset):
@@ -39,7 +39,7 @@ class AIME2026TRDataset(MathDataset):
     def format_prompt(self, item: dict[str, Any]) -> str:
         r"""Format the prompt for the Turkish AIME2026 task."""
         question = item["problem"].strip()
-        instruction_following = "Adım adım düşün ve nihai cevabı \boxed{} içerisinde ver."
+        instruction_following = "Adım adım düşün ve nihai cevabı \\boxed{} içerisinde ver."
 
         question += " " + instruction_following
         return question
