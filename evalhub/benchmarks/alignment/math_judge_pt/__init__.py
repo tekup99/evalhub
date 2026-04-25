@@ -14,9 +14,9 @@ JUDGE_PROMPT_TEMPLATE = """You are an expert in mathematics and logical reasonin
 Below is the **Problem** and the **Solution (Provided by another AI model)**:
 —
 **Problem**:
-{{question}}
+{question}
 **Solution (Provided by another AI model)**:
-{{solution}}
+{solution}
 —
 Please perform the following tasks:
 1. **Analyze the solution step-by-step**, paying close attention to: - Computational accuracy - Logical consistency - Conceptual understanding - Whether the reasoning is valid and complete
@@ -27,8 +27,8 @@ Please format your response as follows:
 —
 **Issues Identified:**
 - [Issue 1]: [Classification] - [Brief explanation] - [Issue 2]: [Classification] - [Brief explanation] - ...
-Let’s think step by step and output your final judgment within \\boxed{}
-\\boxed{yes} or \\boxed{no}"""
+Let’s think step by step and output your final judgment within \\boxed{{}}
+\\boxed{{yes}} or \\boxed{{no}}"""
 
 MATH_JUDGE_PT_META_DATA = {
     "file_path": "" 
