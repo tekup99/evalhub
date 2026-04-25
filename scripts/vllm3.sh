@@ -60,57 +60,42 @@ start_server_and_wait() {
         --trust-remote-code
     )
 
-    # 2. Smart Template Manager (Resolves v4.44+ requirements & Thinking injections)
-    local template_file="/tmp/template_${port}.jinja"
-    local py_script="/tmp/gen_template_${port}.py"
+    # 2. Hardcoded Template Selection
+    local template_dir="${PROJECT_ROOT}/scripts/templates"
+    local template_file=""
 
-    echo "[INFO] Running Smart Template Manager to resolve chat templates..."
-    cat << 'EOF' > "$py_script"
-import sys
-import re
-from transformers import AutoTokenizer
-
-model_path = sys.argv[1]
-out_file = sys.argv[2]
-
-try:
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    template = getattr(tokenizer, "chat_template", None)
+    # Case-insensitive eşleşme için model adını küçült
+    local model_lower=$(echo "$model_path" | tr '[:upper:]' '[:lower:]')
     
-    if not template:
-        template = getattr(tokenizer, "default_chat_template", None)
-        
-    # Fallback Mechanism: Transformers v4.44 requires a template if tokenizer doesn't define one
-    if not template:
-        template = "{% for message in messages %}{{ message['content'] + '\\n\\n' }}{% endfor %}"
-
-    # Thinking Mode Injection & Sanitization
-    if 'enable_thinking' in template:
-        # Prepend kwargs initialization and force enable_thinking=true
-        prefix = "{% set kwargs = kwargs | default({}) %}\n{% set enable_thinking = true %}\n"
-        template = prefix + template
-        
-        # Aggressively sanitize any attempt to pull enable_thinking from undefined kwargs
-        template = re.sub(r"kwargs\.get\(\s*['\"]enable_thinking['\"]\s*,\s*(True|False|true|false)\s*\)", "True", template)
-        template = re.sub(r"kwargs\s*\[\s*['\"]enable_thinking['\"]\s*\]", "True", template)
-
-    with open(out_file, "w", encoding="utf-8") as f:
-        f.write(template)
-
-except Exception as e:
-    print(f"WARN: Template generation failed: {e}", file=sys.stderr)
-    sys.exit(1)
-EOF
-
-    # Execute the template generator and inject if successful
-    if python3 "$py_script" "$model_path" "$template_file"; then
-        if [[ -f "$template_file" ]]; then
-            vllm_args+=( --chat-template "$template_file" )
-            echo "[INFO] Validated/Injected template successfully loaded from $template_file."
+    if [[ "$model_lower" == *"gemma-4"* ]]; then
+        template_file="${template_dir}/gemma4.jinja"
+    elif [[ "$model_lower" == *"ministral"* ]]; then
+        template_file="${template_dir}/ministral3.jinja"
+    elif [[ "$model_lower" == *"qwen"* ]]; then
+        # Qwen versiyon kontrolü
+        if [[ "$model_lower" == *"3.6"* ]]; then
+            template_file="${template_dir}/qwen3.6.jinja"
+        elif [[ "$model_lower" == *"3.5"* ]]; then
+            template_file="${template_dir}/qwen3.5.jinja"
+        else
+            echo "[WARNING] Qwen versiyonu net olarak anlaşılamadı. Varsayılan olarak Qwen 3.5 template'i kullanılıyor."
+            template_file="${template_dir}/qwen3.5.jinja"
         fi
     else
-        echo "[WARN] Python template extraction failed. Allowing vLLM to attempt native loading."
+        echo "[ERROR] Desteklenmeyen/Bilinmeyen model tespit edildi: $model_path" >&2
+        echo "[ERROR] Lütfen '$template_dir' dizinine bu model için uygun bir Jinja template'i ekleyin ve 'scripts/vllm.sh' içindeki if-else bloğunu güncelleyin." >&2
+        exit 1
     fi
+
+    # Seçilen template'in diskte gerçekten var olup olmadığını kontrol et
+    if [[ ! -f "$template_file" ]]; then
+        echo "[ERROR] Template dosyası diskte bulunamadı: $template_file" >&2
+        echo "[ERROR] Lütfen ilgili jinja dosyasını belirtilen path'e oluşturduğunuzdan emin olun." >&2
+        exit 1
+    fi
+
+    echo "[INFO] Model için belirlenen chat template yükleniyor: $template_file"
+    vllm_args+=( --chat-template "$template_file" )
 
     # 3. Pass arguments safely to vLLM
     python -m vllm.entrypoints.openai.api_server "${vllm_args[@]}" >> "$log_file" 2>&1 &
@@ -172,12 +157,30 @@ run_eval_worker() {
     local out_dir="${PROJECT_ROOT}/results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
+    # --- H200 Dynamic Worker Assignment Logic (BASE) ---
+    local dynamic_workers=192
+    local model_lower=$(echo "$TARGET_MODEL" | tr '[:upper:]' '[:lower:]')
+    
+    if [[ "$model_lower" == *"0.8b"* ]]; then
+        dynamic_workers=512
+    elif [[ "$model_lower" == *"e2b"* ]] || [[ "$model_lower" == *"2b"* ]] || [[ "$model_lower" == *"3b"* ]]; then
+        dynamic_workers=384
+    elif [[ "$model_lower" == *"e4b"* ]] || [[ "$model_lower" == *"4b"* ]] || [[ "$model_lower" == *"8b"* ]] || [[ "$model_lower" == *"9b"* ]]; then
+        dynamic_workers=256
+    elif [[ "$model_lower" == *"14b"* ]] || [[ "$model_lower" == *"35b"* ]]; then
+        dynamic_workers=192
+    fi
+
+    local final_num_workers="${BASE_NUM_WORKERS:-$dynamic_workers}"
+    echo "[INFO] Base Worker Allocation -> Using: $final_num_workers (User Config: ${BASE_NUM_WORKERS:-empty}, H200 Auto: $dynamic_workers)"
+    # ---------------------------------------------
+
     local cmd_args=(
         --model "hosted_vllm/$TARGET_MODEL"
         --tasks "$BENCHMARK"
         --temperature "$TEMPERATURE"
         --n-samples "$N_SAMPLES"
-        --num-workers "$BASE_NUM_WORKERS"
+        --num-workers "$final_num_workers"
         --max-completion-tokens "$MAX_COMPLETION_TOKENS"
         --output-dir "$out_dir"
     )
@@ -209,7 +212,6 @@ run_extract_worker() {
     local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"    
     
     # === DEPENDENCY FALLBACK CHECK ===
-    # Eğer base_job fail olduysa dosyalar oluşmamıştır. Zincir kopsun istemiyorsak temiz çıkıyoruz.
     if [[ ! -f "$results_file" && ! -f "$raw_file" ]]; then
         echo "[ERROR] Base evaluation dosyaları bulunamadı. Önceki adım (base_job) patlamış olabilir."
         echo "[INFO] Dependency zincirini kırmamak için boş dosya oluşturulup graceful exit yapılıyor."
@@ -224,7 +226,6 @@ run_extract_worker() {
         echo "[WARN] Extraction betiği 0 correct (pass@k=0) nedeniyle hata döndürmüş olabilir. Dependency kırılmaması için devam ediliyor."
     }
     
-    # Python patlasa da boş bir JSONL dosyası oluşturalım ki judge fail olmak yerine graceful exit yapabilsin
     touch "$output_filtered"
 }
 
@@ -241,10 +242,8 @@ run_judge_worker() {
     fi
 
     # === PASS@K 0 CHECK ===
-    # Filtrelenmiş dosya boyutu 0 ise (hiç doğru çıkmamışsa), judge kısmını boşuna VRAM harcamadan atla.
     if [[ ! -s "$FILTERED_FILE" ]]; then
         echo "[INFO] Filtrelenmiş dosya boş veya eksik (pass@k=0). Judge worker atlanıyor ve temiz çıkış yapılıyor."
-        # Post worker'ın patlamaması için dummy bir çıktı bırak
         touch "$out_dir/math_judge.jsonl"
         exit 0
     fi
@@ -262,12 +261,30 @@ run_judge_worker() {
 
     local final_override="{\"file_path\": \"$FILTERED_FILE\"}"
     
+    # --- H200 Dynamic Worker Assignment Logic (JUDGE) ---
+    local dynamic_workers=192
+    local model_lower=$(echo "$JUDGE_MODEL" | tr '[:upper:]' '[:lower:]')
+    
+    if [[ "$model_lower" == *"0.8b"* ]]; then
+        dynamic_workers=512
+    elif [[ "$model_lower" == *"e2b"* ]] || [[ "$model_lower" == *"2b"* ]] || [[ "$model_lower" == *"3b"* ]]; then
+        dynamic_workers=384
+    elif [[ "$model_lower" == *"e4b"* ]] || [[ "$model_lower" == *"4b"* ]] || [[ "$model_lower" == *"8b"* ]] || [[ "$model_lower" == *"9b"* ]]; then
+        dynamic_workers=256
+    elif [[ "$model_lower" == *"14b"* ]] || [[ "$model_lower" == *"35b"* ]]; then
+        dynamic_workers=192
+    fi
+
+    local final_judge_workers="${JUDGE_NUM_WORKERS:-$dynamic_workers}"
+    echo "[INFO] Judge Worker Allocation -> Using: $final_judge_workers (User Config: ${JUDGE_NUM_WORKERS:-empty}, H200 Auto: $dynamic_workers)"
+    # ---------------------------------------------
+
     local cmd_args=(
         --model "hosted_vllm/$JUDGE_MODEL"
         --tasks "math_judge"
         --temperature "$JUDGE_TEMP"
         --n-samples "$JUDGE_N_SAMPLES"
-        --num-workers "$JUDGE_NUM_WORKERS"
+        --num-workers "$final_judge_workers"
         --max-completion-tokens "$JUDGE_MAX_COMPLETION_TOKENS"
         --output-dir "$out_dir"
         --override-args "$final_override"
@@ -306,7 +323,6 @@ run_post_worker() {
     local stats_file="${out_dir}/${BENCHMARK}_generation_stats.json"
 
     # === PASS@K 0 CHECK ===
-    # Judge dosyası boşsa script'leri çalıştırmadan dummy metric'ler ile bitir
     if [[ ! -s "$eval_judge_output" ]]; then
         echo "[INFO] Judge output boş (muhtemelen pass@k=0). Post-processing atlanıyor."
         touch "$majority_file" "$judged_results_file"
@@ -339,7 +355,6 @@ run_orchestrator() {
                 local run_id="${clean_model}_${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}"
                 echo "[INFO] Submitting DAG for Combination: $run_id"
 
-                # Önceki model/benchmark setinin bitmesini beklemek için bağımlılık (afterany kullanıyoruz)
                 local global_dep=""
                 [[ -n "$global_last_job_id" ]] && global_dep="--dependency=afterany:${global_last_job_id}"
 
@@ -357,7 +372,7 @@ run_orchestrator() {
                     --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
                     "$script_path")
 
-                # 2. Aşama: Pass@K Extraction (Doğru cevapların süzülmesi - afterany)
+                # 2. Aşama: Pass@K Extraction
                 local extract_job=$(sbatch --parsable --dependency=afterany:"${base_job}" \
                     --job-name="extr_${run_id}" \
                     --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
@@ -368,15 +383,12 @@ run_orchestrator() {
 
                 local filtered_file="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
 
-                # Judge döngüsü için başlangıç dependency'si extract_job'dır.
                 local last_judge_dep="${extract_job}"
 
-                # Judge ve Post aşamalarının kontrolü
                 if [[ -z "${JUDGE_MODELS:-}" ]]; then
                     echo "[INFO] JUDGE_MODELS is empty. Skipping judge and post-processing stages for $run_id."
                     global_last_job_id="${extract_job}"
                 else
-                    # Judge modelleri içinde de chain oluşturuyoruz (birbiri ardına çalışacaklar)
                     for JUDGE in $JUDGE_MODELS; do
                         for J_TEMP in ${JUDGE_TEMPERATURES:-$JUDGE_TEMP}; do
                             local clean_judge=$(basename "$JUDGE")
@@ -385,7 +397,7 @@ run_orchestrator() {
                             local judge_nodelist=""
                             [[ -n "${JUDGE_SLURM_NODELIST:-}" ]] && judge_nodelist="--nodelist=$JUDGE_SLURM_NODELIST"
 
-                            # 3. Aşama: CoT Judging (Bir önceki adımın bitmesini bekler - afterany)
+                            # 3. Aşama: CoT Judging
                             local judge_job=$(sbatch --parsable --dependency=afterany:"${last_judge_dep}" \
                                 --job-name="jdg_${judge_run_id}" \
                                 --output="${PROJECT_ROOT}/logs/jdg_${judge_run_id}_%j.out" \
@@ -396,7 +408,7 @@ run_orchestrator() {
                                 --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
                                 "$script_path")
 
-                            # 4. Aşama: Post-processing (Kendi judge job'ını bekler - afterany)
+                            # 4. Aşama: Post-processing
                             local post_job=$(sbatch --parsable --dependency=afterany:"${judge_job}" \
                                 --job-name="post_${judge_run_id}" \
                                 --output="${PROJECT_ROOT}/logs/post_${judge_run_id}_%j.out" \
@@ -405,12 +417,10 @@ run_orchestrator() {
                                 --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP",PROJECT_ROOT="${PROJECT_ROOT}" \
                                 "$script_path")
                             
-                            # Sonraki judge iterasyonu, bu judge'ın post-processing'inin bitmesini beklesin
                             last_judge_dep="${post_job}"
                         done
                     done
                     
-                    # Sonraki Base Model iterasyonu en son submit edilen post_job'ı bekleyecek
                     global_last_job_id="${last_judge_dep}"
                 fi
                 echo "[INFO] DAG Submitted. Tail Job ID: $global_last_job_id"

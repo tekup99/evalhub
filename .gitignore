@@ -25,7 +25,8 @@ share/python-wheels/
 results/
 results2/
 results3/
-results-en-without-shot/
+results-en-without-shot-old-prompt/
+results-tr-without-shot-old-prompt/
 data2/
 data3/
 data4/
