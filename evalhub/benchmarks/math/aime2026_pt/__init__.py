@@ -39,8 +39,7 @@ class AIME2026PTDataset(MathDataset):
     def format_prompt(self, item: dict[str, Any]) -> str:
         r"""Format the prompt for the Portuguese AIME2026 task."""
         question = item["problem"].strip()
-        ###TODO: Portuguese Inst Following
-#        instruction_following = "Adım adım düşün ve nihai cevabı \\boxed{} içerisinde ver."
+        instruction_following = "Vamos pensar passo a passo e apresentar a resposta final dentro de \\boxed{}."
 
         question += " " + instruction_following
         return question

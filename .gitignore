@@ -32,9 +32,9 @@ data2/
 data3/
 data4/
 logs/
+scripts//vllm.env/
 data/
 scripts/sglang.env/
-scripts/vllm.env/
 comparison_plots/
 *.egg-info/
 .installed.cfg
