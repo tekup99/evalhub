@@ -8,9 +8,9 @@ from evalhub.benchmarks.registry import register_dataset, DATASET_MAP
 from evalhub.benchmarks.math.verifier.rllm import extract_boxed_answer
 from evalhub.utils.logger import logger
 
-MATH_JUDGE = "math_judge"
+MATH_JUDGE_PT= "math_judge_pt"
 
-JUDGE_PROMPT_TEMPLATE = """You are an expert in mathematics and logical reasoning. Your task is to evaluate the correctness of a solution to a given math problem, with a **strong emphasis on the reasoning process**, not just the final answer.
+JUDGE_PROMPT_TEMPLATE = """You are an expert in mathematics and logical reasoning. Your task is to evaluate the correctness of a solution to a given math problem **(written in European Portuguese)**, with a **strong emphasis on the reasoning process**, not just the final answer.
 Below is the **Problem** and the **Solution (Provided by another AI model)**:
 —
 **Problem**:
@@ -22,6 +22,7 @@ Please perform the following tasks:
 1. **Analyze the solution step-by-step**, paying close attention to: - Computational accuracy - Logical consistency - Conceptual understanding - Whether the reasoning is valid and complete
 2. **Identify any issues or errors in the reasoning**, even if the final answer is correct. Classify them into the following categories (if applicable): - **Calculation Error**: Mistakes in arithmetic, algebraic manipulation, or numerical computation. - **Logical Error**: Invalid reasoning, flawed logic, or incorrect inference. - **Conceptual Error**: Misunderstanding or misuse of mathematical concepts or definitions. - **Omission / Incompleteness**: Missing steps, incomplete justification, or not addressing all parts of the question. - **Other**: Any other type of error that does not fit into the above categories.
 3. **Provide a final judgment** on whether the solution is logically sound and free of errors in reasoning.
+4. **Language Consideration**: Ignore whether the solution is provided in European Portuguese, English, or a combination of both (language switching). Focus exclusively on mathematical and logical correctness, disregarding the language used in the evaluation.
 Please format your response as follows:
 —
 **Issues Identified:**
@@ -29,17 +30,17 @@ Please format your response as follows:
 Let’s think step by step and output your final judgment within \\boxed{}
 \\boxed{yes} or \\boxed{no}"""
 
-MATH_JUDGE_META_DATA = {
+MATH_JUDGE_PT_META_DATA = {
     "file_path": "" 
 }
 
-@register_dataset((MATH_JUDGE, "local/math_judge", True))
-class MathJudgeDataset(MathDataset):
-    """Dataset class for LLM-as-a-Judge on generated math solutions."""
+@register_dataset((MATH_JUDGE_PT, "local/math_judge_pt", True))
+class MathJudgePTDataset(MathDataset):
+    """Dataset class for LLM-as-a-Judge on generated math solutions for European Portuguese Benchmarks."""
 
-    def __init__(self, name: str = MATH_JUDGE, meta_data: dict[str, Any] = None, **kwargs):
+    def __init__(self, name: str = MATH_JUDGE_PT, meta_data: dict[str, Any] = None, **kwargs):
             if meta_data is None:
-                meta_data = MATH_JUDGE_META_DATA.copy()
+                meta_data = MATH_JUDGE_PT_META_DATA.copy()
                 
             file_path = meta_data.get("file_path")
             if file_path and os.path.exists(file_path):
@@ -54,7 +55,6 @@ class MathJudgeDataset(MathDataset):
             logger.error(f"File not found or not provided: {file_path}. Please provide a valid file_path via --override-args.")
             return
 
-        # Benchmarkları tekrar tekrar yüklememek için önbellek sözlüğü
         loaded_benchmarks = {}
 
         with open(file_path, "r", encoding="utf-8") as f:
@@ -63,16 +63,13 @@ class MathJudgeDataset(MathDataset):
                     continue
                 item = json.loads(line)
                 
-                orig_id = item.get("original_task_id") # Örn: "AIME2025/0"
+                orig_id = item.get("original_task_id") 
                 
                 if orig_id:
-                    # ID'yi parçalayarak benchmark ismini bul ("aime2025")
                     benchmark_name = orig_id.split('/')[0].lower()
                     
-                    # Eğer bu benchmark daha önce belleğe alınmadıysa DATASET_MAP'ten yükle
                     if benchmark_name not in loaded_benchmarks:
                         try:
-                            # Import edilmiş tüm veri setleri arasında bulmaya çalış
                             dataset_cls = DATASET_MAP.get(benchmark_name)
                             
                             if dataset_cls is None:
@@ -85,12 +82,10 @@ class MathJudgeDataset(MathDataset):
                             logger.error(f"Failed to load benchmark {benchmark_name}: {e}")
                             loaded_benchmarks[benchmark_name] = None
                     
-                    # Benchmark başarıyla yüklendiyse soruyu (prompt) içinden çek
                     benchmark_ds = loaded_benchmarks.get(benchmark_name)
                     if benchmark_ds:
                         original_task = benchmark_ds.tasks.get(orig_id)
                         
-                        # Eğer ID birebir eşleşmezse (büyük/küçük harf farkı vs.) case-insensitive ara
                         if not original_task:
                             for k, v in benchmark_ds.tasks.items():
                                 if str(k).lower() == str(orig_id).lower():
@@ -107,7 +102,6 @@ class MathJudgeDataset(MathDataset):
                 else:
                     item["question"] = "MISSING_QUESTION_IN_DATA"
 
-                # Task nesnesini oluştur
                 task = Task(
                     task_id=item["task_id"],
                     prompt=self.format_prompt(item),
@@ -119,7 +113,7 @@ class MathJudgeDataset(MathDataset):
                 
                 groundtruth = GroundTruth(
                     task_id=item["task_id"],
-                    answer="yes" 
+                    answer="yes" # İleride şablonu Türkçe yaparsan burayı "evet" olarak güncellemelisin
                 )
                 
                 self.add_task(task)
@@ -150,4 +144,4 @@ class MathJudgeDataset(MathDataset):
         """Check if the judge evaluated it as 'yes'."""
         if extracted_answer is None:
             return False
-        return extracted_answer == "yes"
+        return extracted_answer == "yes" # İleride şablonu Türkçe yaparsan burayı "evet" olarak güncellemelisin
