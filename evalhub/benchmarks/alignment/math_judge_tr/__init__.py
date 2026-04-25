@@ -17,7 +17,7 @@ from evalhub.utils.pbar import get_progress_bar
 MATH_JUDGE_TR = "math_judge_tr"
 
 # Türkçe değerlendirme istemi
-JUDGE_PROMPT_TEMPLATE_TR = """You are an expert in mathematics and logical reasoning. Your task is to evaluate the correctness of a solution to a given math problem, with a **strong emphasis on the reasoning process**, not just the final answer.
+JUDGE_PROMPT_TEMPLATE_TR = """You are an expert in mathematics and logical reasoning. Your task is to evaluate the correctness of a solution to a given math problem, with a **strong emphasis on the reasoning process**, not just the final answer. Please note that the question language is in Turkish.
 
 Below is the **Problem** and the **Solution (Provided by another AI model)**:
 
@@ -38,6 +38,7 @@ Please perform the following tasks:
 1. **Analyze the solution step-by-step**, paying close attention to: - Computational accuracy - Logical consistency - Conceptual understanding - Whether the reasoning is valid and complete
 2. **Identify any issues or errors in the reasoning**, even if the final answer is correct. Classify them into the following categories (if applicable): - **Calculation Error**: Mistakes in arithmetic, algebraic manipulation, or numerical computation. - **Logical Error**: Invalid reasoning, flawed logic, or incorrect inference. - **Conceptual Error**: Misunderstanding or misuse of mathematical concepts or definitions. - **Omission / Incompleteness**: Missing steps, incomplete justification, or not addressing all parts of the question. - **Other**: Any other type of error that does not fit into the above categories.
 3. **Provide a final judgment** on whether the solution is logically sound and free of errors in reasoning.
+4. **Evaluate mathematical logic regardless of language:** The provided solution might be written in English or Turkish. Ignore the language used and focus strictly on whether the solution is mathematically logical and sound based on the details provided in the prompt.
 
 Please format your response as follows:
 
@@ -134,7 +135,7 @@ class MathJudgeTRDataset(MathDataset):
                 
                 groundtruth = GroundTruth(
                     task_id=item["task_id"],
-                    answer="evet" 
+                    answer="yes" 
                 )
                 
                 self.add_task(task)
@@ -162,7 +163,7 @@ class MathJudgeTRDataset(MathDataset):
     def check_correct(self, extracted_answer: str | None, ground_truth: str, task_id: str = None) -> bool:
         if extracted_answer is None:
             return False
-        return extracted_answer in ["evet", "yes"]
+        return extracted_answer in ["yes"]
 
     def evaluate(self, solution: str | os.PathLike, output_dir: str | os.PathLike) -> None:
         """Override edilmiş evaluate metodu: evet, yes ve total için ayrı pass@k hesaplar."""

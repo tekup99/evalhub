@@ -31,6 +31,12 @@ set -a
 source "$CONFIG_FILE"
 set +a
 
+# --- YENİ DİZİN MANTIĞI BURADA BAŞLIYOR ---
+# Eğer vllm.env içinde path verilmemişse varsayılan değerlere fallback yap.
+export RESULTS_BASE_DIR="${RESULTS_ROOT_DIR:-${PROJECT_ROOT}/results}"
+export FILTERED_BASE_DIR="${FILTERED_DATA_ROOT_DIR:-${PROJECT_ROOT}/data/passatk_filtered}"
+# ------------------------------------------
+
 # Ensure HF_TOKEN is exposed to vLLM
 export HF_TOKEN="${HF_TOKEN:-}"
 
@@ -154,7 +160,7 @@ run_eval_worker() {
     export HOSTED_VLLM_API_KEY="EMPTY"
 
     local clean_model=$(basename "$TARGET_MODEL")
-    local out_dir="${PROJECT_ROOT}/results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
+    local out_dir="${RESULTS_BASE_DIR}/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
     # --- H200 Dynamic Worker Assignment Logic (BASE) ---
@@ -203,10 +209,10 @@ run_eval_worker() {
 run_extract_worker() {
     echo "[INFO] --- Running Pass@K Extraction ---"
     local clean_model=$(basename "$TARGET_MODEL")
-    local filtered_dir="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}"
+    local filtered_dir="${FILTERED_BASE_DIR}/${clean_model}"
     mkdir -p "$filtered_dir" "${PROJECT_ROOT}/logs"
     
-    local out_dir="${PROJECT_ROOT}/results/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"    
+    local out_dir="${RESULTS_BASE_DIR}/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"    
     local results_file="${out_dir}/${BENCHMARK}_results.jsonl"
     local raw_file="${out_dir}/${BENCHMARK}_raw.jsonl"
     local output_filtered="${filtered_dir}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"    
@@ -234,11 +240,11 @@ run_judge_worker() {
     
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
-        FILTERED_FILE="${PROJECT_ROOT}/data/passatk_filtered/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
+        FILTERED_FILE="${FILTERED_BASE_DIR}/${clean_target}/${BENCHMARK}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}_corrects.jsonl"
     fi
 
     # === PASS@K 0 CHECK ===
@@ -308,14 +314,14 @@ run_post_worker() {
     local clean_target=$(basename "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
     
-    local out_dir="${PROJECT_ROOT}/results/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
     rm -f "${out_dir}/math_judge_summary.json"
 
     local eval_judge_output="${out_dir}/math_judge.jsonl"
     [[ ! -f "$eval_judge_output" ]] && eval_judge_output="${out_dir}/math_judge_raw.jsonl"
 
     local majority_file="${out_dir}/math_judge_majority.jsonl"
-    local base_results_path="${PROJECT_ROOT}/results/${clean_target}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
+    local base_results_path="${RESULTS_BASE_DIR}/${clean_target}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     local base_results_file="${base_results_path}/${BENCHMARK}_results.jsonl"
 
     local judged_results_file="${out_dir}/${BENCHMARK}_results.jsonl"
@@ -341,8 +347,8 @@ run_post_worker() {
 run_orchestrator() {
     echo "[INFO] Initializing Unified Pipeline Orchestrator (Monolithic Mode)"
 
-    # Gerekli dizinlerin oluşturulması
-    mkdir -p "${PROJECT_ROOT}/logs" "${PROJECT_ROOT}/results/judgments" "${PROJECT_ROOT}/data/passatk_filtered" "${PROJECT_ROOT}/plots" "${PROJECT_ROOT}/data/cache"
+    # Gerekli dizinlerin oluşturulması - RESULTS_BASE_DIR ve FILTERED_BASE_DIR eklendi
+    mkdir -p "${PROJECT_ROOT}/logs" "${RESULTS_BASE_DIR}/judgments" "${FILTERED_BASE_DIR}" "${PROJECT_ROOT}/plots" "${PROJECT_ROOT}/data/cache"
 
     local script_path=$(realpath "$0")
     local global_last_job_id=""
@@ -381,7 +387,7 @@ run_orchestrator() {
                     --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",PROJECT_ROOT="${PROJECT_ROOT}" \
                     "$script_path")
 
-                local filtered_file="${PROJECT_ROOT}/data/passatk_filtered/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
+                local filtered_file="${FILTERED_BASE_DIR}/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
 
                 local last_judge_dep="${extract_job}"
 
