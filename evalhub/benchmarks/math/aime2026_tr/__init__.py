@@ -24,7 +24,7 @@ class AIME2026TRDataset(MathDataset):
         df = pd.read_parquet(data_path)
         
         for _, row in df.iterrows():
-            task_id = f"AIME2026-TR/{row['problem_idx']}"
+            task_id = f"{AIME2026_TR}/{row['problem_idx']}"
             task = Task(
                 task_id=task_id,
                 prompt=self.format_prompt(row.to_dict()),

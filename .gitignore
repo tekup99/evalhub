@@ -25,6 +25,7 @@ share/python-wheels/
 results/
 results2/
 results3/
+results_with_original_templates/
 results-en-without-shot-old-prompt/
 results-tr-without-shot-old-prompt/
 results-en-gemma-with-think-prompt/

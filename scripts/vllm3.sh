@@ -43,9 +43,27 @@ export HF_TOKEN="${HF_TOKEN:-}"
 RUN_MODE="${RUN_MODE:-orchestrator}"
 BASE_PORT="${PORT:-30000}"
 
+# Yeni Think Modu Varsayılan Değeri (Env'den gelmezse false)
+export THINK_MODE="${THINK_MODE:-false}"
+
 # ------------------------------------------------------------------------------
 # Utilities
 # ------------------------------------------------------------------------------
+
+# Klasör ve Log İsimlerini Temizleyen Helper Fonksiyon
+# Eğer model Base, Instruct veya Reasoning ise _think takısı EKLENMEZ.
+get_clean_model_name() {
+    local model_path="$1"
+    local model_lower=$(echo "$model_path" | tr '[:upper:]' '[:lower:]')
+    local base_name=$(basename "$model_path")
+
+    if [[ "$model_lower" == *"base"* ]] || [[ "$model_lower" == *"instruct"* ]] || [[ "$model_lower" == *"reasoning"* ]]; then
+        echo "${base_name}"
+    else
+        echo "${base_name}_think-${THINK_MODE}"
+    fi
+}
+
 start_server_and_wait() {
     local model_path="$1"
     local port="$2"
@@ -57,6 +75,7 @@ start_server_and_wait() {
     
     echo "[INFO] Initializing vLLM server for model: $model_path on port $port"
     echo "[INFO] Hardware Strategy: --tensor-parallel-size $p_count"
+    echo "[INFO] Think Mode is set to: $THINK_MODE"
 
     # 1. Store basic vLLM arguments
     local vllm_args=(
@@ -72,20 +91,38 @@ start_server_and_wait() {
 
     # Case-insensitive eşleşme için model adını küçült
     local model_lower=$(echo "$model_path" | tr '[:upper:]' '[:lower:]')
+    local think_mode_lower=$(echo "$THINK_MODE" | tr '[:upper:]' '[:lower:]')
     
-    if [[ "$model_lower" == *"gemma-4"* ]]; then
-        template_file="${template_dir}/gemma4.jinja"
-    elif [[ "$model_lower" == *"ministral"* ]]; then
-        template_file="${template_dir}/ministral3.jinja"
-    elif [[ "$model_lower" == *"qwen"* ]]; then
-        # Qwen versiyon kontrolü
-        if [[ "$model_lower" == *"3.6"* ]]; then
-            template_file="${template_dir}/qwen3.6.jinja"
-        elif [[ "$model_lower" == *"3.5"* ]]; then
-            template_file="${template_dir}/qwen3.5.jinja"
+    # TEMPLATE MİMARİSİ
+    # -----------------
+    # Base Modeller (Think moduna bakılmaz)
+    if [[ "$model_lower" == *"qwen3.5"* || "$model_lower" == *"qwen3.6"* ]] && [[ "$model_lower" == *"base"* ]]; then
+        template_file="${template_dir}/qwen3.5-base.jinja"
+    elif [[ "$model_lower" == *"gemma4"* || "$model_lower" == *"gemma-4"* ]] && [[ "$model_lower" == *"base"* ]]; then
+        template_file="${template_dir}/gemma4-base.jinja"
+    elif [[ "$model_lower" == *"ministral"* ]] && [[ "$model_lower" == *"base"* ]]; then
+        template_file="${template_dir}/ministral3-base.jinja"
+    
+    # Ministral Instruct ve Reasoning Modelleri (Think moduna bakılmaz)
+    elif [[ "$model_lower" == *"ministral"* ]] && [[ "$model_lower" == *"instruct"* ]]; then
+        template_file="${template_dir}/ministral3-instruct.jinja"
+    elif [[ "$model_lower" == *"ministral"* ]] && [[ "$model_lower" == *"reasoning"* ]]; then
+        template_file="${template_dir}/ministral3-reasoning.jinja"
+        
+    # Qwen3.5 ve Qwen3.6 Instruct/Diğer varyasyonlar (Think moduna bakılır)
+    elif [[ "$model_lower" == *"qwen3.5"* || "$model_lower" == *"qwen3.6"* ]]; then
+        if [[ "$think_mode_lower" == "true" ]]; then
+            template_file="${template_dir}/qwen3.5-think.jinja"
         else
-            echo "[WARNING] Qwen versiyonu net olarak anlaşılamadı. Varsayılan olarak Qwen 3.5 template'i kullanılıyor."
-            template_file="${template_dir}/qwen3.5.jinja"
+            template_file="${template_dir}/qwen3.5-no-think.jinja"
+        fi
+        
+    # Gemma 4 Instruct/Diğer varyasyonlar (Think moduna bakılır)
+    elif [[ "$model_lower" == *"gemma4"* || "$model_lower" == *"gemma-4"* ]]; then
+        if [[ "$think_mode_lower" == "true" ]]; then
+            template_file="${template_dir}/gemma4-think.jinja"
+        else
+            template_file="${template_dir}/gemma4-no-think.jinja"
         fi
     else
         echo "[ERROR] Desteklenmeyen/Bilinmeyen model tespit edildi: $model_path" >&2
@@ -159,7 +196,8 @@ run_eval_worker() {
     export HOSTED_VLLM_API_BASE="http://127.0.0.1:$worker_port/v1"
     export HOSTED_VLLM_API_KEY="EMPTY"
 
-    local clean_model=$(basename "$TARGET_MODEL")
+    # OUTPUT DİZİNİ DEĞİŞİKLİĞİ: Yardımcı fonksiyon kullanılıyor
+    local clean_model=$(get_clean_model_name "$TARGET_MODEL")
     local out_dir="${RESULTS_BASE_DIR}/${clean_model}_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     mkdir -p "$out_dir"
     
@@ -208,7 +246,9 @@ run_eval_worker() {
 
 run_extract_worker() {
     echo "[INFO] --- Running Pass@K Extraction ---"
-    local clean_model=$(basename "$TARGET_MODEL")
+    
+    # OUTPUT DİZİNİ DEĞİŞİKLİĞİ: Yardımcı fonksiyon kullanılıyor
+    local clean_model=$(get_clean_model_name "$TARGET_MODEL")
     local filtered_dir="${FILTERED_BASE_DIR}/${clean_model}"
     mkdir -p "$filtered_dir" "${PROJECT_ROOT}/logs"
     
@@ -238,9 +278,10 @@ run_extract_worker() {
 run_judge_worker() {
     echo "[INFO] --- Starting CoT Judging ---"
     
-    local clean_target=$(basename "$TARGET_MODEL")
+    # OUTPUT DİZİNİ DEĞİŞİKLİĞİ: Yardımcı fonksiyon kullanılıyor
+    local clean_target=$(get_clean_model_name "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
@@ -253,7 +294,7 @@ run_judge_worker() {
         touch "$out_dir/math_judge.jsonl"
         exit 0
     fi
-
+    export THINK_MODE="true"
     local worker_port=$((BASE_PORT + 10000 + RANDOM % 10000))
     export EVALHUB_CACHE_DIR="${PROJECT_ROOT}/data/cache/judge_${RANDOM}"
     mkdir -p "$EVALHUB_CACHE_DIR" "${PROJECT_ROOT}/logs"
@@ -311,10 +352,12 @@ run_judge_worker() {
 
 run_post_worker() {
     echo "[INFO] --- Post-Processing Judge Outputs ---"
-    local clean_target=$(basename "$TARGET_MODEL")
+    
+    # OUTPUT DİZİNİ DEĞİŞİKLİĞİ: Yardımcı fonksiyon kullanılıyor
+    local clean_target=$(get_clean_model_name "$TARGET_MODEL")
     local clean_judge=$(basename "$JUDGE_MODEL")
     
-    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}evaluated_by${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${clean_target}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
     rm -f "${out_dir}/math_judge_summary.json"
 
     local eval_judge_output="${out_dir}/math_judge.jsonl"
@@ -354,7 +397,8 @@ run_orchestrator() {
     local global_last_job_id=""
 
     for MODEL in $BASE_MODELS; do
-        local clean_model=$(basename "$MODEL")
+        # ORCHESTRATOR'DA DA DİZİN VE LOG İSİMLERİ AYRIŞTIRILIYOR
+        local clean_model=$(get_clean_model_name "$MODEL")
         for BENCHMARK in $BENCHMARKS; do
             for B_TEMP in $BASE_TEMPERATURES; do
                 
@@ -368,6 +412,7 @@ run_orchestrator() {
                 [[ -n "${BASE_SLURM_NODELIST:-}" ]] && nodelist_param="--nodelist=$BASE_SLURM_NODELIST"
 
                 # 1. Aşama: Base Evaluation (vLLM Server + Generation)
+                # Export içerisine THINK_MODE dahil ediliyor.
                 local base_job=$(sbatch --parsable $global_dep \
                     --job-name="eval_${run_id}" \
                     --output="${PROJECT_ROOT}/logs/eval_${run_id}_%j.out" \
@@ -375,7 +420,7 @@ run_orchestrator() {
                     --ntasks=1 --cpus-per-task="${BASE_SLURM_CPUS}" --mem="${BASE_SLURM_MEM}" \
                     --gres="${BASE_SLURM_GRES}" --time="${BASE_SLURM_TIME}" \
                     $nodelist_param \
-                    --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
+                    --export=ALL,RUN_MODE="eval_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",N_SAMPLES="$BASE_N_SAMPLES",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}" \
                     "$script_path")
 
                 # 2. Aşama: Pass@K Extraction
@@ -384,7 +429,7 @@ run_orchestrator() {
                     --output="${PROJECT_ROOT}/logs/extr_${run_id}_%j.out" \
                     --ntasks=1 --cpus-per-task="${EXTRACT_SLURM_CPUS}" --mem="${EXTRACT_SLURM_MEM}" \
                     --time="${EXTRACT_SLURM_TIME}" \
-                    --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",PROJECT_ROOT="${PROJECT_ROOT}" \
+                    --export=ALL,RUN_MODE="extract_worker",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}" \
                     "$script_path")
 
                 local filtered_file="${FILTERED_BASE_DIR}/${clean_model}/${BENCHMARK}_t${B_TEMP}_max${BASE_MAX_COMPLETION_TOKENS}_corrects.jsonl"
@@ -411,7 +456,7 @@ run_orchestrator() {
                                 --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
                                 --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
                                 $judge_nodelist \
-                                --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}" \
+                                --export=ALL,RUN_MODE="judge_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",FILTERED_FILE="$filtered_file",JUDGE_TEMP="$J_TEMP",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}" \
                                 "$script_path")
 
                             # 4. Aşama: Post-processing
@@ -420,7 +465,7 @@ run_orchestrator() {
                                 --output="${PROJECT_ROOT}/logs/post_${judge_run_id}_%j.out" \
                                 --ntasks=1 --cpus-per-task="${POST_SLURM_CPUS}" --mem="${POST_SLURM_MEM}" \
                                 --time="${POST_SLURM_TIME}" \
-                                --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP",PROJECT_ROOT="${PROJECT_ROOT}" \
+                                --export=ALL,RUN_MODE="post_worker",JUDGE_MODEL="$JUDGE",TARGET_MODEL="$MODEL",BENCHMARK="$BENCHMARK",TEMPERATURE="$B_TEMP",MAX_COMPLETION_TOKENS="$BASE_MAX_COMPLETION_TOKENS",JUDGE_TEMP="$J_TEMP",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}" \
                                 "$script_path")
                             
                             last_judge_dep="${post_job}"

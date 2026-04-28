@@ -100,10 +100,13 @@ def auto_mode(args):
             if base_dir_name.startswith(base_prefix):
                 # 3. Madde: Klasorun altindaki tum t0.6, t0.0 vb. dosyalari bul
                 for summary_file in j_dir.rglob("*summary.json"):
-                    # Ayni benchmark (or. aime2026) dosyasi oldugunu garantiye al
-                    if benchmark_name in summary_file.name or benchmark_name in summary_file.parent.name:
+                    # Ayni benchmark dosyasi oldugunu garantiye al (Tam eşleşme ile alt dize çakışmasını önle)
+                    is_exact_folder = summary_file.parent.name == benchmark_name
+                    is_exact_file = summary_file.name == f"{benchmark_name}_summary.json"
+                    
+                    if is_exact_folder or is_exact_file:
                         judge_paths.append(summary_file)
-    
+                        
     plt.figure(figsize=(10, 6))
     has_data = False
 

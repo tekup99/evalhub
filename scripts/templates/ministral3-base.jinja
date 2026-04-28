@@ -1,11 +1,11 @@
 {#- Default system message if no system prompt is passed. #}
-{%- set default_system_message = '# HOW YOU SHOULD THINK AND ANSWER\n\nFirst draft your thinking process (inner monologue) until you arrive at a response. Format your response using Markdown, and use LaTeX for any mathematical equations. Write both your thoughts and the response in the same language as the input.\n\nYour thinking process must follow the template below:[THINK]Your thoughts or/and draft, like working through an exercise on scratch paper. Be as casual and as long as you want until you are confident to generate the response to the user.[/THINK]Here, provide a self-contained response.' %}
+{%- set default_system_message = 'You are Ministral 3 Instruct, Large Language Model (LLM) created by Mistral AI, a French startup headquartered in Paris.\nYou power an AI assistant called Le Chat.\nYour knowledge base was last updated on 2023-10-01.\nThe current date is {today}.\n\nWhen you\'re not sure about some information or when the user\'s request requires up-to-date or specific data, you must use the available tools to fetch the information. Do not hesitate to use tools whenever they can provide a more accurate or complete response. If no relevant tools are available, then clearly state that you don\'t have the information and avoid making up anything.\nIf the user\'s question is not clear, ambiguous, or does not provide enough context for you to accurately answer the question, you do not try to answer it right away and you rather ask the user to clarify their request (e.g. "What are some good restaurants around me?" => "Where are you?" or "When is the next flight to Tokyo" => "Where do you travel from?").\nYou are always very attentive to dates, in particular you try to resolve dates (e.g. "yesterday" is {yesterday}) and when asked about information at specific dates, you discard information that is at another date.\nNext sections describe the capabilities that you have.\n\n# WEB BROWSING INSTRUCTIONS\n\nYou cannot perform any web search or access internet to open URLs, links etc. If it seems like the user is expecting you to do so, you clarify the situation and ask the user to copy paste the text directly in the chat.\n\n# MULTI-MODAL INSTRUCTIONS\n\nYou have the ability to read images, but you cannot generate images. You also cannot transcribe audio files or videos.\nYou cannot read nor transcribe audio files or videos.\n\n# TOOL CALLING INSTRUCTIONS\n\nYou may have access to tools that you can use to fetch information or perform actions. You must use these tools in the following situations:\n\n1. When the request requires up-to-date information.\n2. When the request requires specific data that you do not have in your knowledge base.\n3. When the request involves actions that you cannot perform without tools.\n\nAlways prioritize using tools to provide the most accurate and helpful response. If tools are not available, inform the user that you cannot perform the requested action at the moment.' %}
 
 {#- Begin of sequence token. #}
 {{- bos_token }}
 
 {#- Handle system prompt if it exists. #}
-{#- System prompt supports text content or text and thinking chunks. #}
+{#- System prompt supports text content or text chunks. #}
 {%- if messages[0]['role'] == 'system' %}
     {{- '[SYSTEM_PROMPT]' -}}
     {%- if messages[0]['content'] is string %}
@@ -14,10 +14,8 @@
         {%- for block in messages[0]['content'] %}
             {%- if block['type'] == 'text' %}
                 {{- block['text'] }}
-            {%- elif block['type'] == 'thinking' %}
-                {{- '[THINK]' + block['thinking'] + '[/THINK]' }}
             {%- else %}
-                {{- raise_exception('Only text and thinking chunks are supported in system message contents.') }}
+                {{- raise_exception('Only text chunks are supported in system message contents.') }}
             {%- endif %}
         {%- endfor %}
     {%- endif %}
@@ -79,40 +77,37 @@
             {{- raise_exception('User message must have a string or a list of chunks in content') }}
         {%- endif %}
 
-    {#- Assistant messages supports text content or text, image and thinking chunks. #}
+    {#- Assistant messages supports text content or text and image chunks. #}
     {%- elif message['role'] == 'assistant' %}
         {%- if (message['content'] is none or message['content'] == '' or message['content']|length == 0) and (message['tool_calls'] is not defined or message['tool_calls'] is none or message['tool_calls']|length == 0) %}
             {{- raise_exception('Assistant message must have a string or a list of chunks in content or a list of tool calls.') }}
         {%- endif %}
 
-        {%- if message['content'] is string and message['content'] != '' %}
+        {%- if message['content'] is string %}
             {{- message['content'] }}
         {%- elif message['content'] | length > 0 %}
             {%- for block in message['content'] %}
                 {%- if block['type'] == 'text' %}
                     {{- block['text'] }}
-                {%- elif block['type'] == 'thinking' %}
-                    {{- '[THINK]' + block['thinking'] + '[/THINK]' }}
                 {%- else %}
-                    {{- raise_exception('Only text and thinking chunks are supported in assistant message contents.') }}
+                    {{- raise_exception('Only text chunks are supported in assistant message contents.') }}
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
         
         {%- if message['tool_calls'] is defined and message['tool_calls'] is not none and message['tool_calls']|length > 0 %}
             {%- for tool in message['tool_calls'] %}
-                {{- '[TOOL_CALLS]' }}
-                {%- set name = tool['function']['name'] %}
                 {%- set arguments = tool['function']['arguments'] %}
                 {%- if arguments is not string %}
                     {%- set arguments = arguments|tojson|safe %}
                 {%- elif arguments == '' %}
                     {%- set arguments = '{}' %}
                 {%- endif %}
-                {{- name + '[ARGS]' + arguments }}
+                {{- '[TOOL_CALLS]' + tool['function']['name'] + '[ARGS]' + arguments }}
             {%- endfor %}
         {%- endif %}
 
+        {#- End of sequence token for each assistant messages. #}
         {{- eos_token }}
 
     {#- Tool messages only supports text content. #}
@@ -124,3 +119,4 @@
         {{- raise_exception('Only user, assistant and tool roles are supported, got ' + message['role'] + '.') }}
     {%- endif %}
 {%- endfor %}
+
