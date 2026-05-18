@@ -147,14 +147,25 @@ start_server_and_wait() {
 }
 
 cleanup_server_and_cache() {
-    echo "[INFO] Cleaning up server (PID: ${SERVER_PID:-}) and cache directory..."
+    echo "[INFO] Cleaning up server (PID: ${SERVER_PID:-}) and VRAM cache..."
     if [[ -n "${SERVER_PID:-}" ]]; then
-        kill "$SERVER_PID" 2>/dev/null || true
+        # 1. Ana vLLM sürecini ve TÜM alt/çocuk süreçlerini acımasızca anında öldür
+        pkill -P "$SERVER_PID" -9 2>/dev/null || true
+        kill -9 "$SERVER_PID" 2>/dev/null || true
         SERVER_PID="" 
     fi
+
+    # 2. VRAM'i zorla boşaltmak için Ray/PyTorch Python worker'larını temizle 
+    # (Önceki modelden kalan hiçbir şeyin VRAM'i bloke etmediğinden emin ol)
+    pkill -9 -f "vllm.engine.arg_utils" 2>/dev/null || true
+    pkill -9 -f "ray::" 2>/dev/null || true
+
     if [[ -n "${EVALHUB_CACHE_DIR:-}" ]]; then
         rm -rf "$EVALHUB_CACHE_DIR"
     fi
+    
+    # 3. İşletim sistemine RAM/VRAM'i toparlaması için 5 saniye nefes payı ver
+    sleep 5
 }
 
 # ------------------------------------------------------------------------------

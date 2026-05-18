@@ -31,33 +31,38 @@ search_pattern = "results/**/*_summary.json"
 for filepath in glob.glob(search_pattern, recursive=True):
     parts = filepath.split(os.sep)
     
-    base_model = ""
-    judge_model = ""
-    benchmark = ""
+    # Güvenlik kontrolü: parts içinde "results" olmalı
+    if "results" not in parts:
+        continue
+        
+    res_idx = parts.index("results")
     
-    filename = parts[-1]
-    benchmark = filename.replace("_summary.json", "")
+    # Dosya yolu en az 'results / kategori / model / benchmark / dosya.json' uzunluğunda olmalı
+    if len(parts) < res_idx + 4:
+        continue
+        
+    # 1. Kırılım: Kategori (base, instruct, reasoning)
+    category = parts[res_idx + 1]
     
-    # Model ve Judge isimlerini ayrıştırma
-    if "judgments" in parts:
-        idx = parts.index("judgments")
-        model_folder = parts[idx + 1]
+    # 2. Kırılım: Model adı veya "judgments" klasörü
+    if parts[res_idx + 2] == "judgments":
+        model_folder = parts[res_idx + 3]
         
         if "evaluated_by" in model_folder:
             splits = model_folder.split("evaluated_by", 1)
-            base_model = splits[0]
-            judge_model = splits[1]
+            base_model = splits[0].strip("_")
+            judge_model = splits[1].strip("_")
         else:
             base_model = model_folder
             judge_model = "Unknown_Judge"
     else:
-        if "results" in parts:
-            idx = parts.index("results")
-            base_model = parts[idx + 1]
-        else:
-            base_model = parts[0]
-            
+        model_folder = parts[res_idx + 2]
+        base_model = model_folder
         judge_model = "" 
+        
+    # Dosya adından benchmark ismini çıkarma
+    filename = parts[-1]
+    benchmark = filename.replace("_summary.json", "")
         
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -72,6 +77,7 @@ for filepath in glob.glob(search_pattern, recursive=True):
                     all_metrics.add(key)
                     
             row_data = {
+                "Category": category,
                 "Base Model": base_model,
                 "Judge Model": judge_model,
                 "Benchmark": benchmark
@@ -82,8 +88,8 @@ for filepath in glob.glob(search_pattern, recursive=True):
     except Exception as e:
         print(f"Uyarı - Okunamayan/Bozuk JSON: {filepath} | Hata: {e}")
 
-# Satır Sıralaması: Base Model -> Judge Model -> Benchmark
-results.sort(key=lambda x: (x["Base Model"], x["Judge Model"], x["Benchmark"]))
+# Satır Sıralaması: Category -> Base Model -> Judge Model -> Benchmark
+results.sort(key=lambda x: (x["Category"], x["Base Model"], x["Judge Model"], x["Benchmark"]))
 
 # KOLON SIRALAMASI MANTIĞI
 pass_k_cols = []
@@ -114,7 +120,7 @@ pass_k_cols.sort(key=get_k_value)
 other_cols.sort()
 
 # Nihai Kolon (Header) Sıralamasını Oluştur
-headers = ["Base Model", "Judge Model", "Benchmark"] + pass_k_cols + cons_cols + other_cols + note_cols
+headers = ["Category", "Base Model", "Judge Model", "Benchmark"] + pass_k_cols + cons_cols + other_cols + note_cols
 
 output_path = "results/all_results.csv"
 

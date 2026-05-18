@@ -30,13 +30,9 @@ set -a
 source "$CONFIG_FILE"
 set +a
 
-export RESULTS_BASE_DIR="${RESULTS_ROOT_DIR:-${PROJECT_ROOT}/results}"
-export FILTERED_BASE_DIR="${FILTERED_DATA_ROOT_DIR:-${PROJECT_ROOT}/data/passatk_filtered}"
-
 export HF_TOKEN="${HF_TOKEN:-}"
 RUN_MODE="${RUN_MODE:-orchestrator}"
 BASE_PORT="${PORT:-30000}"
-export THINK_MODE="${THINK_MODE:-false}"
 export WAIT_FOR_JOB_ID="${WAIT_FOR_JOB_ID:-}"
 
 # ------------------------------------------------------------------------------
@@ -47,11 +43,21 @@ if [[ -z "${BASE_GENERATION_PATH:-}" ]]; then
     exit 1
 fi
 
-# Trailing slash temizleme
+# Trailing slash temizleme (Sondaki fazladan eğik çizgiyi siler)
 BASE_GENERATION_PATH="${BASE_GENERATION_PATH%/}"
 
+# Path hiyerarşisini ayrıştırma
 BENCHMARK=$(basename "$BASE_GENERATION_PATH")
-PARENT_DIR=$(basename "$(dirname "$BASE_GENERATION_PATH")")
+MODEL_DIR_PATH=$(dirname "$BASE_GENERATION_PATH")
+PARENT_DIR=$(basename "$MODEL_DIR_PATH")
+
+# DİNAMİK KATEGORİ ÇIKARIMI: 'base', 'instruct' veya 'reasoning' klasörünü bulur.
+# Örnek path: .../results/base/qwen3.5_t0.7_max1024/gsm8k -> CATEGORY_DIR="base" olur.
+CATEGORY_DIR=$(basename "$(dirname "$MODEL_DIR_PATH")")
+
+# Kategoriye göre kök dizinlerin dinamik atanması (env'deki hardcoded ayarların yerine geçer)
+export RESULTS_BASE_DIR="${PROJECT_ROOT}/results/${CATEGORY_DIR}"
+export FILTERED_BASE_DIR="${PROJECT_ROOT}/data/${CATEGORY_DIR}"
 
 # Metadata çıkarımı: Klasör adının formatının <model>_t<temp>_max<tokens> olduğu varsayılıyor
 MAX_COMPLETION_TOKENS=$(echo "$PARENT_DIR" | grep -o 'max[0-9]*$' | sed 's/max//')
@@ -59,9 +65,21 @@ TEMPERATURE=$(echo "$PARENT_DIR" | sed -n 's/.*_t\([0-9]*\.[0-9]*\)_max.*/\1/p')
 CLEAN_TARGET=$(echo "$PARENT_DIR" | sed "s/_t${TEMPERATURE}_max${MAX_COMPLETION_TOKENS}//")
 
 if [[ -z "$CLEAN_TARGET" || -z "$TEMPERATURE" || -z "$MAX_COMPLETION_TOKENS" ]]; then
-    echo "[ERROR] Yetersiz path formatı. Beklenen format: .../<model>_t<temp>_max<tokens>/<benchmark>" >&2
+    echo "[ERROR] Yetersiz path formatı. Beklenen format: .../<kategori>/<model>_t<temp>_max<tokens>/<benchmark>" >&2
     exit 1
 fi
+
+# THINK MODE ÇIKARIMI:
+# Kategori "reasoning" ise veya clean target "think" içeriyorsa true, base/instruct gibi durumlar için false.
+if [[ "$CATEGORY_DIR" == "reasoning" ]] || [[ "$CLEAN_TARGET" == *"think"* ]]; then
+    export THINK_MODE="true"
+else
+    export THINK_MODE="false"
+fi
+
+echo "[INFO] Tespit edilen kategori: $CATEGORY_DIR"
+echo "[INFO] Think Mode (Hedef Model İçin): $THINK_MODE"
+echo "[INFO] Sonuçlar şu dizine kaydedilecek: $RESULTS_BASE_DIR"
 
 # Model Tipi Kontrolü (Gemma veya Qwen3.5 yakalama)
 model_lower=$(echo "$CLEAN_TARGET" | tr '[:upper:]' '[:lower:]')
@@ -73,7 +91,6 @@ fi
 
 # Sistem uyumluluğu için
 TARGET_MODEL="$CLEAN_TARGET"
-
 
 # ------------------------------------------------------------------------------
 # Utilities
@@ -212,7 +229,8 @@ run_judge_worker() {
     echo "[INFO] --- Starting CoT Judging for Model: $JUDGE_MODEL ---"
     
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="${RESULTS_BASE_DIR}/judgments/${CLEAN_TARGET}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"   
+    # Sondaki _t$JUDGE_TEMP kaldırıldı
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${CLEAN_TARGET}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}"   
     mkdir -p "$out_dir"
 
     if [[ -z "${FILTERED_FILE:-}" ]]; then
@@ -225,7 +243,9 @@ run_judge_worker() {
         return 0
     fi
     
+    # Kural: Judge her zaman THINK_MODE="true" olarak çalışır.
     export THINK_MODE="true"
+    
     local worker_port=$((BASE_PORT + 10000 + RANDOM % 10000))
     export EVALHUB_CACHE_DIR="${PROJECT_ROOT}/data/cache/judge_${RANDOM}"
     mkdir -p "$EVALHUB_CACHE_DIR" "${PROJECT_ROOT}/logs"
@@ -291,7 +311,8 @@ run_post_worker() {
     echo "[INFO] --- Post-Processing Judge Outputs ---"
     
     local clean_judge=$(basename "$JUDGE_MODEL")
-    local out_dir="${RESULTS_BASE_DIR}/judgments/${CLEAN_TARGET}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}_t${JUDGE_TEMP}"
+    # Sondaki _t$JUDGE_TEMP kaldırıldı
+    local out_dir="${RESULTS_BASE_DIR}/judgments/${CLEAN_TARGET}_evaluated_by_${clean_judge}_${JUDGE_MAX_COMPLETION_TOKENS}/${BENCHMARK}"
     rm -f "${out_dir}/math_judge_summary.json"
 
     local eval_judge_output="${out_dir}/math_judge.jsonl"
@@ -374,7 +395,8 @@ run_orchestrator() {
     local judge_nodelist=""
     [[ -n "${JUDGE_SLURM_NODELIST:-}" ]] && judge_nodelist="--nodelist=$JUDGE_SLURM_NODELIST"
 
-    # Base Generation step is skipped, directly submitting Extract+Judge+Post as a combined job
+    # Export listesine kategori dinamiklerini de paslıyoruz. 
+    # Slurm alt işlemde bu değerlere ihtiyaç duyacak
     local pipe_job=$(sbatch --parsable $global_dep \
         --job-name="pipe_${run_id}" \
         --output="${PROJECT_ROOT}/logs/pipe_${run_id}_%j.out" \
@@ -382,7 +404,7 @@ run_orchestrator() {
         --ntasks=1 --cpus-per-task="${JUDGE_SLURM_CPUS}" --mem="${JUDGE_SLURM_MEM}" \
         --gres="${JUDGE_SLURM_GRES}" --time="${JUDGE_SLURM_TIME}" \
         $judge_nodelist \
-        --export=ALL,RUN_MODE="extract_judge_post_worker",CLEAN_TARGET="$CLEAN_TARGET",BENCHMARK="$BENCHMARK",TEMPERATURE="$TEMPERATURE",MAX_COMPLETION_TOKENS="$MAX_COMPLETION_TOKENS",BASE_GENERATION_PATH="$BASE_GENERATION_PATH",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}" \
+        --export=ALL,RUN_MODE="extract_judge_post_worker",CLEAN_TARGET="$CLEAN_TARGET",BENCHMARK="$BENCHMARK",TEMPERATURE="$TEMPERATURE",MAX_COMPLETION_TOKENS="$MAX_COMPLETION_TOKENS",BASE_GENERATION_PATH="$BASE_GENERATION_PATH",HF_TOKEN="${HF_TOKEN}",PROJECT_ROOT="${PROJECT_ROOT}",THINK_MODE="${THINK_MODE}",CATEGORY_DIR="${CATEGORY_DIR}" \
         "$script_path")
         
     echo "[INFO] DAG Submitted successfully. Job ID: $pipe_job"
